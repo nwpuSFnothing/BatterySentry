@@ -1,0 +1,63 @@
+# Rust / Cargo build output (including nested crates)
+target/
+**/*.rs.bk
+
+# Release packages, integration-test output and coverage
+/dist/
+/artifacts/
+/build/
+/out/
+/coverage/
+*.profraw
+*.profdata
+lcov.info
+
+# Executables, libraries, linker output and debug symbols
+*.exe
+*.dll
+*.pdb
+*.ilk
+*.exp
+*.lib
+*.obj
+*.o
+*.a
+*.so
+*.dylib
+*.rlib
+*.rmeta
+*.res
+*.dSYM/
+
+# Python developer-tool caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Local IDE state
+/.serena/
+/.vs/
+/.idea/
+*.suo
+*.user
+*.swp
+*.swo
+*~
+
+# Temporary files and local configuration
+*.log
+*.tmp
+*.temp
+.env
+.env.*
+!.env.example
+
+# OS metadata
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Keep Cargo.lock for reproducible application builds.
+# Keep assets/*.ico and assets/*.rc: build.rs uses them as source inputs.
