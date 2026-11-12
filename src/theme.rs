@@ -1,4 +1,26 @@
 //! Colors shared by the light panel and system-themed taskbar widget.
+pub const FONT_FAMILY: &str = "Segoe UI";
+pub const FONT_TITLE: i32 = 20;
+pub const FONT_BODY: i32 = 15;
+pub const FONT_SMALL: i32 = 13;
+pub const FONT_VALUE: i32 = 24;
+pub const FONT_WIDGET: i32 = 18;
+pub const WEIGHT_NORMAL: u32 = 400;
+pub const WEIGHT_MEDIUM: u32 = 600;
+pub const MARGIN: i32 = 16;
+pub const GAP: i32 = 8;
+pub const RADIUS_CARD: i32 = 12;
+pub const RADIUS_BUTTON: i32 = 8;
+pub const BUTTON_HEIGHT: i32 = 36;
+pub const ROW_HEIGHT: i32 = 88;
+pub const LIST_TOP: i32 = 104;
+pub const FOOTER_HEIGHT: i32 = 60;
+pub const SETTINGS_TOP: i32 = 72;
+pub const SETTINGS_HEIGHT: i32 = 264;
+pub const MIN_WIDTH: i32 = 360;
+pub const MIN_HEIGHT: i32 = 280;
+pub const DEFAULT_WIDTH: i32 = 420;
+pub const DEFAULT_HEIGHT: i32 = LIST_TOP + 2 * ROW_HEIGHT + FOOTER_HEIGHT;
 pub const fn rgb(r: u32, g: u32, b: u32) -> u32 {
     r | (g << 8) | (b << 16)
 }

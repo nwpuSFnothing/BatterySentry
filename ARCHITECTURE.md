@@ -17,7 +17,8 @@ BatterySentry 是一个使用 Rust 开发的 Windows 桌面程序，使用 Win32
 ```mermaid
 flowchart TD
     Entry[main.rs 入口] --> App[app.rs 应用状态与主线程]
-    App --> Panel[panel.rs 布局与交互状态]
+    App --> Panel[panel.rs 页面与交互状态]
+    App --> UI[src/ui 绘制与布局]
     App --> Worker[电量读取线程]
     Worker --> Scanner[drivers.rs 扫描器与缓存]
     Scanner --> Driver[ATK 与 AULA 协议驱动]
@@ -44,7 +45,8 @@ flowchart TD
 | [src/protocol.rs](src/protocol.rs) | 构造协议字节，校验和解析响应 | `BatteryValue`、各品牌的请求与解析函数 |
 | [src/hid.rs](src/hid.rs) | 枚举 HID 接口，打开设备，完成有超时控制的读写 | `Interface`、`enumerate()`、`Transport` |
 | [src/taskbar.rs](src/taskbar.rs) | 发现任务栏，收集占用范围，计算可放置位置 | `Tracker`、`Layout`、`snapshot()`、`rightmost_gap()` |
-| [src/panel.rs](src/panel.rs) | 计算主界面控件位置、可见列表范围和动画状态 | `Panel`、`Control`、`Bounds` |
+| [src/panel.rs](src/panel.rs) | 保存页面、滚动和动画状态 | `Panel` |
+| [src/ui/mod.rs](src/ui/mod.rs) | 组织布局、设备、设置、控件和物理像素绘制 | `View`、`Renderer` |
 | [src/tray.rs](src/tray.rs) | 管理通知区域图标和右键菜单 | `TrayIcon`、`context_menu()` |
 | [src/startup.rs](src/startup.rs) | 读取和设置启动文件夹快捷方式 | `enabled()`、`set_enabled()` |
 | [src/config.rs](src/config.rs) | 加载、校验和保存用户配置 | `Config::load()`、`Config::save()` |
@@ -111,7 +113,7 @@ flowchart TD
 | 主界面窗口 | 显示全部设备与设置，接收用户操作 | 按需创建，可隐藏后重新打开 |
 | 任务栏组件窗口 | 在任务栏空闲区域绘制设备名称和电量 | 根据布局创建、隐藏或重建 |
 
-主题配色集中在 `theme.rs`，设备卡片和独立设置页的实现细节见 [界面改版说明](UI_REDESIGN.md)。
+绘制后端位于 `src/ui/renderer.rs`，使用显式 DPI 和物理像素，复用字体与双缓冲。布局位于 `src/ui/layout.rs`，设备、设置和通用控件分别绘制。主题配色与布局尺度集中在 `theme.rs`，设备卡片和独立设置页的实现细节见 [界面改版说明](UI_REDESIGN.md)。
 
 可选通知区域图标由 `TrayIcon` 管理，图标回调消息发送给隐藏宿主窗口。
 
@@ -304,7 +306,7 @@ sequenceDiagram
 
 ## 八、主界面与通知图标
 
-`panel.rs` 保存设备页和设置页状态、控件边界、悬停、按下、键盘焦点、各页滚动位置和动画进度。`app.rs` 处理 Windows 输入消息，并使用这些状态绘制界面。
+`panel.rs` 保存设备页和设置页状态、控件边界、悬停、按下、键盘焦点、各页滚动位置和动画进度。`app.rs` 处理 Windows 输入消息，再把界面状态交给 `ui::View` 绘制。
 
 设备列表按行高计算可见范围，只绘制可见行，形成虚拟滚动。窗口拉伸会增加可显示空间，尺寸按逻辑像素保存。刷新结果到达后，会尽量用设备键保留用户当前浏览的位置。
 
@@ -321,8 +323,9 @@ sequenceDiagram
 | 配置项 | 含义 | 默认值 |
 | --- | --- | --- |
 | `interval` | 周期刷新间隔，单位为秒 | `60` |
-| `window_width` | 主界面逻辑宽度 | `460` |
-| `window_height` | 主界面逻辑高度 | `504` |
+| `window_width` | 主界面逻辑宽度 | `420` |
+| `window_height` | 两台设备时的主界面逻辑高度 | `340` |
+| `window_size_manual` | 是否保留手动调整的尺寸 | `0` |
 | `show_tray_icon` | 是否显示通知区域图标 | `1` |
 
 刷新间隔仅接受预设选项。配置读取失败或字段不合法时使用默认值。保存时先写临时文件，再通过替换操作更新正式文件。
@@ -357,7 +360,7 @@ sequenceDiagram
 | 电量刷新、后台线程与结果更新 | `app.rs` 的 `Worker`、`refresh()`、`results()` |
 | 任务栏空位、与 LiteMonitor 共存 | `taskbar.rs` 的 `snapshot()`、`collect_native()`、`rightmost_gap()` |
 | 组件消失、重试和自动打开面板 | `app.rs` 的 `apply_layout()`、`layout_failed()`、`WM_TIMER` 分支 |
-| 窗口缩放、滚动、控件命中 | `panel.rs`，再看 `app.rs` 的输入和绘制代码 |
+| 窗口缩放、滚动、控件命中 | `ui/layout.rs`、`panel.rs`，再看 `app.rs` 的输入与尺寸处理 |
 | 双击启动、自启后台运行、重复启动 | `main.rs`、`app::run()`、`startup.rs`、`desktop_instance_name()` |
 
 阅读主要逻辑可以按 `protocol.rs` → `drivers.rs` → `hid.rs` → `app.rs` 的读取线程与结果处理 → `taskbar.rs` → `app.rs` 的窗口生命周期展开，再补充配置、自启和通知图标。这样能先理解数据从哪里来，再理解数据如何驱动桌面显示。

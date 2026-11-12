@@ -1,3 +1,4 @@
+use crate::theme::{DEFAULT_HEIGHT, DEFAULT_WIDTH, MIN_HEIGHT, MIN_WIDTH};
 use std::{fs, io, path::PathBuf};
 pub const INTERVALS: [u32; 6] = [30, 60, 120, 300, 600, 1800];
 #[derive(Debug, Clone, Copy)]
@@ -6,14 +7,16 @@ pub struct Config {
     pub window_width: i32,
     pub window_height: i32,
     pub show_tray_icon: bool,
+    pub window_size_manual: bool,
 }
 impl Default for Config {
     fn default() -> Self {
         Self {
             interval: 60,
-            window_width: 460,
-            window_height: 504,
+            window_width: DEFAULT_WIDTH,
+            window_height: DEFAULT_HEIGHT,
             show_tray_icon: true,
+            window_size_manual: false,
         }
     }
 }
@@ -40,10 +43,27 @@ impl Config {
                 .filter(|n| (minimum..=4096).contains(n))
                 .unwrap_or(fallback)
         };
+        let width = dimension("window_width=", DEFAULT_WIDTH, MIN_WIDTH);
+        let height = dimension("window_height=", DEFAULT_HEIGHT, MIN_HEIGHT);
+        let legacy_default = width == 460 && matches!(height, 504 | 530);
+        let window_size_manual = text
+            .lines()
+            .find_map(|line| line.strip_prefix("window_size_manual="))
+            .map(|value| matches!(value.trim(), "1" | "true"))
+            .unwrap_or(!legacy_default && (width != DEFAULT_WIDTH || height != DEFAULT_HEIGHT));
         Self {
             interval,
-            window_width: dimension("window_width=", 460, 360),
-            window_height: dimension("window_height=", 504, 370),
+            window_width: if legacy_default && !window_size_manual {
+                DEFAULT_WIDTH
+            } else {
+                width
+            },
+            window_height: if legacy_default && !window_size_manual {
+                DEFAULT_HEIGHT
+            } else {
+                height
+            },
+            window_size_manual,
             show_tray_icon: text
                 .lines()
                 .find_map(|line| line.strip_prefix("show_tray_icon="))
@@ -65,11 +85,12 @@ impl Config {
         fs::write(
             &temp,
             format!(
-                "interval={}\nwindow_width={}\nwindow_height={}\nshow_tray_icon={}\n",
+                "interval={}\nwindow_width={}\nwindow_height={}\nshow_tray_icon={}\nwindow_size_manual={}\n",
                 self.interval,
                 self.window_width,
                 self.window_height,
-                u8::from(self.show_tray_icon)
+                u8::from(self.show_tray_icon),
+                u8::from(self.window_size_manual)
             ),
         )?;
         // SAFETY: terminated UTF-16 paths remain valid for the call.

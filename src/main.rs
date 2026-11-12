@@ -9,6 +9,7 @@ mod startup;
 mod taskbar;
 mod theme;
 mod tray;
+mod ui;
 mod win;
 
 fn main() {
