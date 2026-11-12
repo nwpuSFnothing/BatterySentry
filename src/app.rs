@@ -141,6 +141,9 @@ struct App {
     tracker: Option<taskbar::Tracker>,
     layout_busy: bool,
     layout_again: bool,
+    layout_retry_pending: bool,
+    layout_failures: u8,
+    layout_intentionally_hidden: bool,
     widget_dpi: u32,
     layout_status: String,
     busy: bool,
@@ -155,6 +158,16 @@ struct App {
     tray: Option<tray::TrayIcon>,
 }
 impl App {
+    fn layout_failed(&mut self) {
+        if !self.layout_retry_pending {
+            // Allow native discovery and UIA refinement to finish the same attempt.
+            // Repeated window events must not postpone the retry deadline.
+            // SAFETY: this UI thread owns the live host and its retry timer.
+            unsafe { SetTimer(self.host, 4, 3000, None) };
+            self.layout_retry_pending = true;
+        }
+        self.invalidate();
+    }
     fn request_layout(&mut self) {
         if self.layout_busy {
             self.layout_again = true;
@@ -205,6 +218,10 @@ impl App {
             self.layout_again = false;
             self.request_layout();
         }
+        self.layout_intentionally_hidden = layout.intentionally_hidden;
+        if self.layout_intentionally_hidden {
+            self.layout_failures = 0;
+        }
         self.layout_status = layout.reason;
         let dpi_changed = self.widget_dpi != layout.dpi;
         self.widget_dpi = layout.dpi;
@@ -231,6 +248,10 @@ impl App {
                 {
                     // A conservative native container bound is not a new layout.
                     // Keep the last verified UIA placement while refinement runs.
+                    KillTimer(self.host, 4);
+                    self.layout_retry_pending = false;
+                    self.layout_failures = 0;
+                    self.layout_status.clear();
                     return;
                 }
             }
@@ -238,10 +259,7 @@ impl App {
                 if !self.widget.is_null() && IsWindowVisible(self.widget) != 0 {
                     ShowWindow(self.widget, SW_HIDE);
                 }
-                if parent.is_null() {
-                    SetTimer(self.host, 4, 2000, None);
-                }
-                self.invalidate();
+                self.layout_failed();
                 return;
             };
             let mut created = false;
@@ -263,7 +281,7 @@ impl App {
                 );
                 if self.widget.is_null() {
                     self.layout_status = error("Create taskbar display").to_string();
-                    self.invalidate();
+                    self.layout_failed();
                     return;
                 }
                 let style = GetWindowLongPtrW(self.widget, GWL_STYLE) as u32;
@@ -287,7 +305,12 @@ impl App {
             let key = taskbar_key();
             let theme_changed = key != self.widget_key;
             if created || theme_changed {
-                SetLayeredWindowAttributes(self.widget, key, 255, LWA_COLORKEY);
+                if SetLayeredWindowAttributes(self.widget, key, 255, LWA_COLORKEY) == 0 {
+                    self.layout_status = error("Set taskbar display transparency").to_string();
+                    self.destroy_widget();
+                    self.layout_failed();
+                    return;
+                }
                 self.widget_key = key;
             }
             let child = GetParent(self.widget) == parent
@@ -302,20 +325,30 @@ impl App {
             GetWindowRect(self.widget, &mut current);
             let moved = (current.left, current.top, current.right, current.bottom)
                 != (desired.left, desired.top, desired.right, desired.bottom);
-            if created || moved {
-                SetWindowPos(
+            let hidden = IsWindowVisible(self.widget) == 0;
+            let covered = child && GetTopWindow(parent) != self.widget;
+            if (created || moved || hidden || covered)
+                && SetWindowPos(
                     self.widget,
-                    if child { ptr::null_mut() } else { HWND_TOPMOST },
+                    if child { HWND_TOP } else { HWND_TOPMOST },
                     if child { r.left } else { desired.left },
                     if child { r.top } else { desired.top },
                     r.right - r.left,
                     r.bottom - r.top,
-                    SWP_NOACTIVATE | if child { SWP_NOZORDER } else { 0 },
-                );
+                    SWP_NOACTIVATE,
+                ) == 0
+            {
+                self.layout_status = error("Position taskbar display").to_string();
+                self.destroy_widget();
+                self.layout_failed();
+                return;
             }
             if IsWindowVisible(self.widget) == 0 {
                 ShowWindow(self.widget, SW_SHOWNOACTIVATE);
             }
+            KillTimer(self.host, 4);
+            self.layout_retry_pending = false;
+            self.layout_failures = 0;
             if created || moved || dpi_changed || theme_changed {
                 self.invalidate_widget();
             }
@@ -415,6 +448,9 @@ impl App {
             tracker: None,
             layout_busy: false,
             layout_again: false,
+            layout_retry_pending: false,
+            layout_failures: 0,
+            layout_intentionally_hidden: false,
             widget_dpi: 96,
             layout_status: "Waiting for taskbar".into(),
             busy: false,
@@ -1612,7 +1648,21 @@ unsafe extern "system" fn procedure(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
                 app.invalidate();
                 return 0;
             }
-            WM_TIMER if hwnd == app.host && (wp == 3 || wp == 4) => {
+            WM_TIMER if hwnd == app.host && wp == 4 => {
+                KillTimer(hwnd, 4);
+                if app.layout_retry_pending {
+                    app.layout_retry_pending = false;
+                    if !app.layout_intentionally_hidden && app.layout_failures < 3 {
+                        app.layout_failures += 1;
+                        if app.layout_failures == 3 {
+                            app.open_panel();
+                        }
+                    }
+                    app.request_layout();
+                }
+                return 0;
+            }
+            WM_TIMER if hwnd == app.host && wp == 3 => {
                 KillTimer(hwnd, wp);
                 app.request_layout();
                 return 0;

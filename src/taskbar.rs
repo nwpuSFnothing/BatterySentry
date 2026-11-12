@@ -79,6 +79,7 @@ pub fn rightmost_gap(
 
 pub struct Layout {
     pub generation: u64,
+    pub intentionally_hidden: bool,
     pub provisional: bool,
     pub occupied: Vec<Span>,
     pub parent: usize,
@@ -143,6 +144,7 @@ fn snapshot(automation: Option<&IUIAutomation>) -> Layout {
         if bar.is_null() || GetWindowRect(bar, &mut bounds) == 0 || IsWindowVisible(bar) == 0 {
             return Layout {
                 generation: 0,
+                intentionally_hidden: !bar.is_null() && IsWindowVisible(bar) == 0,
                 provisional: false,
                 occupied: Vec::new(),
                 parent: 0,
@@ -158,6 +160,7 @@ fn snapshot(automation: Option<&IUIAutomation>) -> Layout {
         {
             return Layout {
                 generation: 0,
+                intentionally_hidden: true,
                 provisional: false,
                 occupied: Vec::new(),
                 parent: bar as usize,
@@ -182,6 +185,7 @@ fn snapshot(automation: Option<&IUIAutomation>) -> Layout {
         {
             return Layout {
                 generation: 0,
+                intentionally_hidden: true,
                 provisional: false,
                 occupied: Vec::new(),
                 parent: bar as usize,
@@ -288,6 +292,7 @@ fn snapshot(automation: Option<&IUIAutomation>) -> Layout {
         });
         Layout {
             generation: 0,
+            intentionally_hidden: false,
             provisional,
             occupied: trusted_occupied,
             parent: bar as usize,

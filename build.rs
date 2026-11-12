@@ -2,6 +2,7 @@ use std::{env, path::PathBuf, process::Command};
 
 fn main() {
     println!("cargo:rerun-if-changed=assets/app.rc");
+    println!("cargo:rerun-if-changed=assets/app.manifest");
     println!("cargo:rerun-if-changed=assets/BatterySentry.ico");
     if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         return;
@@ -34,5 +35,8 @@ fn main() {
         .status()
         .expect("Run resource compiler");
     assert!(status.success(), "Resource compiler failed");
+    if env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
+        println!("cargo:rustc-link-arg=/MANIFEST:NO");
+    }
     println!("cargo:rustc-link-arg={}", output.display());
 }
