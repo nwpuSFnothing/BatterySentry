@@ -22,19 +22,69 @@ use windows_sys::Win32::{
 struct Paint {
     hwnd: HWND,
     state: PAINTSTRUCT,
+    dc: HDC,
 }
 impl Paint {
     fn begin(hwnd: HWND) -> Self {
         let mut state = PAINTSTRUCT::default();
         // SAFETY: the UI thread serves WM_PAINT for this live HWND.
-        unsafe { BeginPaint(hwnd, &mut state) };
-        Self { hwnd, state }
+        let dc = unsafe { BeginPaint(hwnd, &mut state) };
+        Self { hwnd, state, dc }
     }
 }
 impl Drop for Paint {
     fn drop(&mut self) {
         // SAFETY: validates the paint region on every exit path.
         unsafe { EndPaint(self.hwnd, &self.state) };
+    }
+}
+
+struct Buffer {
+    dc: HDC,
+    bitmap: HBITMAP,
+    previous: HGDIOBJ,
+    width: i32,
+    height: i32,
+}
+impl Buffer {
+    fn new(target: HDC, width: i32, height: i32) -> io::Result<Self> {
+        // SAFETY: dimensions are positive and target is the current paint DC.
+        unsafe {
+            let dc = CreateCompatibleDC(target);
+            if dc.is_null() {
+                return Err(crate::win::error("Create paint DC"));
+            }
+            // Use the display DC so the bitmap keeps its color depth.
+            let bitmap = CreateCompatibleBitmap(target, width, height);
+            if bitmap.is_null() {
+                DeleteDC(dc);
+                return Err(crate::win::error("Create paint bitmap"));
+            }
+            let previous = SelectObject(dc, bitmap);
+            if previous.is_null() {
+                DeleteObject(bitmap);
+                DeleteDC(dc);
+                return Err(crate::win::error("Select paint bitmap"));
+            }
+            SetMapMode(dc, MM_TEXT);
+            Ok(Self {
+                dc,
+                bitmap,
+                previous,
+                width,
+                height,
+            })
+        }
+    }
+}
+impl Drop for Buffer {
+    fn drop(&mut self) {
+        // SAFETY: this buffer uniquely owns the DC and deselects its bitmap first.
+        unsafe {
+            SelectObject(self.dc, self.previous);
+            DeleteObject(self.bitmap);
+            DeleteDC(self.dc);
+        }
     }
 }
 
@@ -297,6 +347,14 @@ fn rect(b: Bounds) -> D2D_RECT_F {
     }
 }
 impl Canvas<'_> {
+    pub fn width(&self) -> i32 {
+        // SAFETY: target size is queried in DIPs on the owning render thread.
+        unsafe { self.target.GetSize().width.floor() as i32 }
+    }
+    pub fn height(&self) -> i32 {
+        // SAFETY: target size is queried in DIPs on the owning render thread.
+        unsafe { self.target.GetSize().height.floor() as i32 }
+    }
     fn remember<T>(&self, result: WinResult<T>) -> Option<T> {
         match result {
             Ok(value) => Some(value),
@@ -640,6 +698,120 @@ mod tests {
     use super::*;
     use windows::core::Interface;
     #[test]
+    fn taskbar_direct2d_draws_into_layered_child() {
+        use crate::{drivers::Reading, protocol::BatteryValue, ui::widget};
+        use windows_sys::Win32::{
+            System::LibraryLoader::GetModuleHandleW, UI::WindowsAndMessaging::*,
+        };
+        struct Window(HWND);
+        impl Drop for Window {
+            fn drop(&mut self) {
+                // SAFETY: the fixture owns this HWND and destroys children first.
+                unsafe { DestroyWindow(self.0) };
+            }
+        }
+        let readings = [
+            Reading {
+                device_key: "atk".into(),
+                identity: String::new(),
+                name: "ATK A9 Plus NK".into(),
+                value: Some(BatteryValue::Percent(83)),
+                last_known: None,
+                detail: String::new(),
+            },
+            Reading {
+                device_key: "aula".into(),
+                identity: String::new(),
+                name: "AULA F87 Pro".into(),
+                value: Some(BatteryValue::Charging),
+                last_known: None,
+                detail: String::new(),
+            },
+        ];
+        // SAFETY: all native windows, DCs and renderer resources stay on this test thread.
+        unsafe {
+            let class = wide("BatterySentry.Direct2DTaskbarCheck");
+            let instance = GetModuleHandleW(ptr::null());
+            let wc = WNDCLASSEXW {
+                cbSize: size_of::<WNDCLASSEXW>() as u32,
+                hInstance: instance,
+                lpfnWndProc: Some(DefWindowProcW),
+                lpszClassName: class.as_ptr(),
+                ..Default::default()
+            };
+            assert_ne!(RegisterClassExW(&wc), 0);
+            let parent = CreateWindowExW(
+                WS_EX_TOOLWINDOW,
+                class.as_ptr(),
+                class.as_ptr(),
+                WS_POPUP,
+                0,
+                0,
+                440,
+                100,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                instance,
+                ptr::null(),
+            );
+            assert!(!parent.is_null());
+            let _parent = Window(parent);
+            let child = CreateWindowExW(
+                WS_EX_LAYERED | WS_EX_NOACTIVATE,
+                class.as_ptr(),
+                class.as_ptr(),
+                WS_CHILD,
+                0,
+                0,
+                200,
+                42,
+                parent,
+                ptr::null_mut(),
+                instance,
+                ptr::null(),
+            );
+            assert!(!child.is_null());
+            let _child = Window(child);
+            let key = theme::rgb(210, 210, 211);
+            assert_ne!(SetLayeredWindowAttributes(child, key, 255, LWA_COLORKEY), 0);
+            let mut renderer = WidgetRenderer::default();
+            for dpi in [96, 120, 144, 192] {
+                SetWindowPos(
+                    child,
+                    ptr::null_mut(),
+                    0,
+                    0,
+                    200 * dpi / 96,
+                    42 * dpi / 96,
+                    SWP_NOZORDER | SWP_NOACTIVATE,
+                );
+                InvalidateRect(child, ptr::null(), 0);
+                renderer
+                    .paint(child, dpi as u32, |c| {
+                        widget::paint_widget(c, &readings, theme::Theme::LIGHT, key);
+                    })
+                    .unwrap();
+                let buffer = renderer.buffer.as_ref().unwrap();
+                assert_eq!(GetPixel(buffer.dc, 0, 0), key);
+                assert_eq!(
+                    GetPixel(buffer.dc, 190 * dpi / 96, 21 * dpi / 96),
+                    theme::Theme::LIGHT.surface
+                );
+                assert!(
+                    !renderer
+                        .factories
+                        .as_ref()
+                        .unwrap()
+                        .text
+                        .borrow()
+                        .formats
+                        .is_empty()
+                );
+            }
+            drop(renderer);
+        }
+    }
+    #[test]
     fn text_layout_reuses_formats_and_preserves_single_line_bounds() {
         let factories = Factories::new().unwrap();
         let mut text = factories.text.borrow_mut();
@@ -674,5 +846,148 @@ mod tests {
                 .unwrap();
         }
         assert!(text.layouts.len() <= 64);
+    }
+}
+
+// The Explorer child keeps its color-keyed HWND and one-to-one DC presentation.
+// All text and geometry use the same DirectWrite/Direct2D Canvas as the panel.
+struct DcDevice {
+    target: ID2D1DCRenderTarget,
+    brush: ID2D1SolidColorBrush,
+    icons: RefCell<HashMap<usize, ID2D1Bitmap>>,
+}
+#[derive(Default)]
+pub struct WidgetRenderer {
+    device: Option<DcDevice>,
+    buffer: Option<Buffer>,
+    factories: Option<Factories>,
+}
+impl WidgetRenderer {
+    pub fn paint(&mut self, hwnd: HWND, dpi: u32, draw: impl Fn(&Canvas<'_>)) -> io::Result<()> {
+        let paint = Paint::begin(hwnd);
+        let mut bounds = RECT::default();
+        // SAFETY: the widget HWND and paint DC are owned by this UI thread.
+        if unsafe { GetClientRect(hwnd, &mut bounds) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if bounds.right <= 0 || bounds.bottom <= 0 {
+            return Ok(());
+        }
+        if !self
+            .buffer
+            .as_ref()
+            .is_some_and(|b| b.width == bounds.right && b.height == bounds.bottom)
+        {
+            // Release the target before deleting the DC to which it was bound.
+            self.device = None;
+            self.buffer = Some(Buffer::new(paint.dc, bounds.right, bounds.bottom)?);
+        }
+        if self.factories.is_none() {
+            self.factories = Some(Factories::new().map_err(io::Error::other)?);
+        }
+        for _ in 0..2 {
+            if self.device.is_none() {
+                self.device = Some(self.create_device().map_err(io::Error::other)?);
+            }
+            let device = self.device.as_ref().expect("widget target initialized");
+            let buffer = self.buffer.as_ref().expect("widget buffer initialized");
+            let area = windows::Win32::Foundation::RECT {
+                left: 0,
+                top: 0,
+                right: bounds.right,
+                bottom: bounds.bottom,
+            };
+            // SAFETY: MM_TEXT memory DC is kept alive until after the DC render target.
+            let bound = unsafe {
+                device
+                    .target
+                    .BindDC(windows::Win32::Graphics::Gdi::HDC(buffer.dc), &area)
+            };
+            if let Err(error) = bound {
+                if error.code() == D2DERR_RECREATE_TARGET {
+                    self.device = None;
+                    continue;
+                }
+                return Err(io::Error::other(error));
+            }
+            // SAFETY: DPI is applied once by Direct2D; grayscale avoids color-key text fringes.
+            unsafe {
+                device.target.SetDpi(dpi.max(96) as f32, dpi.max(96) as f32);
+                device
+                    .target
+                    .SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
+                device
+                    .target
+                    .SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+                device.target.BeginDraw();
+            }
+            let canvas = Canvas {
+                target: &device.target,
+                brush: &device.brush,
+                icons: &device.icons,
+                text: &self
+                    .factories
+                    .as_ref()
+                    .expect("widget factories initialized")
+                    .text,
+                error: RefCell::new(None),
+            };
+            draw(&canvas);
+            // SAFETY: balances BeginDraw and reports deferred drawing failures.
+            let result = unsafe { device.target.EndDraw(None, None) }
+                .and_then(|()| canvas.error.into_inner().map_or(Ok(()), Err));
+            if let Err(error) = result {
+                if error.code() == D2DERR_RECREATE_TARGET {
+                    self.device = None;
+                    continue;
+                }
+                return Err(io::Error::other(error));
+            }
+            // SAFETY: only presents the finished bitmap, without GDI text, geometry or scaling.
+            if unsafe {
+                BitBlt(
+                    paint.dc,
+                    0,
+                    0,
+                    bounds.right,
+                    bounds.bottom,
+                    buffer.dc,
+                    0,
+                    0,
+                    SRCCOPY,
+                )
+            } == 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            return Ok(());
+        }
+        Err(io::Error::other(
+            "Direct2D taskbar target could not be recreated",
+        ))
+    }
+    fn create_device(&self) -> WinResult<DcDevice> {
+        // SAFETY: the factory and its target/brush remain on the widget's UI thread.
+        unsafe {
+            let target = self
+                .factories
+                .as_ref()
+                .expect("widget factories initialized")
+                .d2d
+                .CreateDCRenderTarget(&D2D1_RENDER_TARGET_PROPERTIES {
+                    r#type: D2D1_RENDER_TARGET_TYPE_SOFTWARE,
+                    pixelFormat: D2D1_PIXEL_FORMAT {
+                        format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                        alphaMode: D2D1_ALPHA_MODE_IGNORE,
+                    },
+                    ..Default::default()
+                })?;
+            let brush = target.CreateSolidColorBrush(&color(0), None)?;
+            Ok(DcDevice {
+                target,
+                brush,
+                icons: RefCell::new(HashMap::new()),
+            })
+        }
     }
 }

@@ -1,6 +1,6 @@
-//! Stable GDI rendering for the color-keyed Explorer child window.
-pub use super::gdi::Renderer as WidgetRenderer;
-use super::{devices::reading_status, gdi::Canvas};
+//! Direct2D/DirectWrite drawing presented through the color-keyed Explorer child DC.
+pub use super::renderer::WidgetRenderer;
+use super::{devices::reading_status, renderer::Canvas};
 use crate::{drivers::Reading, panel::Bounds, theme::*};
 
 pub fn paint_widget(c: &Canvas<'_>, readings: &[Reading], theme: Theme, key: u32) {

@@ -1,7 +1,6 @@
 //! Panel presentation. Application and device ownership remain in app.rs and drivers.rs.
 mod components;
 pub mod devices;
-mod gdi;
 pub mod layout;
 pub mod renderer;
 mod settings;
