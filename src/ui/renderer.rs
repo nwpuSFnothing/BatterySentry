@@ -793,10 +793,7 @@ mod tests {
                     .unwrap();
                 let buffer = renderer.buffer.as_ref().unwrap();
                 assert_eq!(GetPixel(buffer.dc, 0, 0), key);
-                assert_eq!(
-                    GetPixel(buffer.dc, 190 * dpi / 96, 21 * dpi / 96),
-                    theme::Theme::LIGHT.surface
-                );
+                assert_eq!(GetPixel(buffer.dc, 190 * dpi / 96, 21 * dpi / 96), key);
                 assert!(
                     !renderer
                         .factories

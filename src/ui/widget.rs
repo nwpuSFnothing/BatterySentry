@@ -24,26 +24,18 @@ pub fn paint_widget(c: &Canvas<'_>, readings: &[Reading], theme: Theme, key: u32
     let gap = 4;
     let value_width = rows
         .iter()
-        .map(|(_, v, _)| c.text_width(v, font, WEIGHT_MEDIUM as i32))
+        .map(|(_, v, _)| c.text_width(v, font, WEIGHT_BOLD as i32))
         .max()
         .unwrap_or(0)
         .max(20);
     let name_width = rows
         .iter()
-        .map(|(n, _, _)| c.text_width(n, font, WEIGHT_MEDIUM as i32))
+        .map(|(n, _, _)| c.text_width(n, font, WEIGHT_BOLD as i32))
         .max()
         .unwrap_or(0)
         .min((c.width() - 2 * pad - gap - value_width).max(1));
     let name_x = (c.width() - pad - value_width - gap - name_width).max(pad);
     let value_x = name_x + name_width + gap;
-    c.round(
-        name_x - pad,
-        0,
-        c.width() - name_x + pad,
-        c.height(),
-        RADIUS_CARD,
-        theme.surface,
-    );
     for (row, (name, value, ink)) in rows.iter().enumerate() {
         let y = row as i32 * half;
         c.text(
@@ -53,7 +45,7 @@ pub fn paint_widget(c: &Canvas<'_>, readings: &[Reading], theme: Theme, key: u32
             name_width,
             half,
             font,
-            WEIGHT_MEDIUM,
+            WEIGHT_BOLD,
             theme.text,
         );
         c.right(
@@ -65,7 +57,7 @@ pub fn paint_widget(c: &Canvas<'_>, readings: &[Reading], theme: Theme, key: u32
                 h: half,
             },
             font,
-            WEIGHT_MEDIUM,
+            WEIGHT_BOLD,
             *ink,
         );
     }
