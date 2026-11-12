@@ -1,9 +1,11 @@
 //! Panel presentation. Application and device ownership remain in app.rs and drivers.rs.
 mod components;
 pub mod devices;
+mod gdi;
 pub mod layout;
 pub mod renderer;
 mod settings;
+pub mod widget;
 
 use crate::{
     config::{Config, INTERVALS},
@@ -76,3 +78,6 @@ impl View<'_> {
         }
     }
 }
+
+#[cfg(test)]
+mod checks;

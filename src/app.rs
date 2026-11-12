@@ -6,7 +6,7 @@ use crate::{
     startup, taskbar,
     theme::{Theme, rgb},
     tray,
-    ui::{self, renderer::Renderer},
+    ui::{self, renderer::Renderer, widget::WidgetRenderer},
     win::{Handle, desktop_instance_name, error, wide},
 };
 use std::{
@@ -122,7 +122,7 @@ struct App {
     readings: Vec<Reading>,
     cfg: Config,
     renderer: Renderer,
-    widget_renderer: Renderer,
+    widget_renderer: WidgetRenderer,
     widget: HWND,
     widget_parent: HWND,
     widget_key: u32,
@@ -352,7 +352,7 @@ impl App {
         };
         let key = taskbar_key();
         let _ = self.widget_renderer.paint(hwnd, self.widget_dpi, |c| {
-            ui::devices::paint_widget(c, readings, theme, key);
+            ui::widget::paint_widget(c, readings, theme, key);
         });
     }
     fn new() -> Self {
@@ -369,7 +369,7 @@ impl App {
             readings: Vec::new(),
             cfg,
             renderer: Renderer::default(),
-            widget_renderer: Renderer::default(),
+            widget_renderer: WidgetRenderer::default(),
             widget: ptr::null_mut(),
             widget_parent: ptr::null_mut(),
             widget_key: 0,
@@ -564,6 +564,7 @@ impl App {
         unsafe {
             KillTimer(self.panel, panel::ANIMATION_TIMER);
             KillTimer(self.panel, 6);
+            self.renderer.release_target();
             ReleaseCapture();
             ShowWindow(self.panel, SW_HIDE);
         }
@@ -977,6 +978,7 @@ unsafe extern "system" fn procedure(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
                 } else {
                     KillTimer(hwnd, panel::ANIMATION_TIMER);
                     KillTimer(hwnd, 6);
+                    app.renderer.release_target();
                 }
                 return 0;
             }
@@ -1172,6 +1174,7 @@ unsafe extern "system" fn procedure(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
                 if !app.panel.is_null() {
                     let panel = app.panel;
                     app.panel = ptr::null_mut();
+                    app.renderer.release_target();
                     DestroyWindow(panel);
                 }
                 DestroyWindow(hwnd);
@@ -1314,6 +1317,7 @@ pub fn run(args: &[String]) -> io::Result<()> {
         let mut state = app.borrow_mut();
         state.tray.take();
         state.destroy_widget();
+        state.renderer.release_target();
         if IsWindow(state.panel) != 0 {
             DestroyWindow(state.panel);
         }
