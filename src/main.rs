@@ -7,6 +7,7 @@ mod panel;
 mod protocol;
 mod startup;
 mod taskbar;
+mod theme;
 mod tray;
 mod win;
 

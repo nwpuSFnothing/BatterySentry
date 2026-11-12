@@ -14,14 +14,14 @@ AULA Device       ~65%
 ## 功能
 
 - 在主显示器的水平任务栏内显示鼠标、键盘电量；空间不足时自动隐藏，避免遮挡其他任务栏项目。
-- 原生无边框设置面板，支持 DPI 缩放和任务栏明暗主题适配。
+- 浅色无边框主面板，使用设备卡片和电量状态标签，支持 DPI 缩放；任务栏组件适配系统明暗主题。
 - 刷新间隔可选 30 秒、1 分钟、2 分钟、5 分钟、10 分钟、30 分钟，默认 1 分钟。
 - 不同设备驱动并行读取，设置面板与任务栏共用读取结果。
 - 支持静默开机自启和单实例运行。
 - `Tray icon` 开关控制通知区域图标，默认开启并自动保存。单击或双击图标打开主界面，右键可打开界面、刷新或退出；关闭图标不影响任务栏电量文字。
 - 设置面板默认单列显示 3 个设备，支持虚拟滚动、滚动条和拖动边框调整大小；名称左对齐、电量右对齐，拉宽窗口可显示更长名称。
 - 最小化与关闭按钮位于右上角，关闭悬停显示红色方形背景；其他按钮和开关提供短时过渡动画，尊重系统动画设置。
-- 刷新间隔使用自绘圆角选项卡，支持鼠标及键盘操作。窗口尺寸会自动保存，刷新不会改变用户设定的尺寸。
+- 设置使用同一窗口内的独立页面，包含登录自启、托盘图标开关和单列刷新间隔选项。支持鼠标及键盘操作，小窗口下可滚动；窗口尺寸自动保存。
 - 型号通过设备身份查询与已知资料匹配；无法确认型号时显示“品牌 + Device”，例如 `AULA Device`，不会根据接收器 PID 猜测型号。
 - 仅向已匹配的接收器发送电量查询命令，不对未知设备发送探测命令。
 
@@ -52,7 +52,7 @@ AULA Device       ~65%
 | 左键点击任务栏电量 | 立即刷新 |
 | 右键点击或双击任务栏电量 | 打开设置面板 |
 | 关闭面板或按 Escape | 关闭面板，程序继续运行 |
-| 点击面板中的 `Exit` | 完全退出程序 |
+| 点击设置页中的 `Exit app` | 完全退出程序 |
 
 电量文字显示位于任务栏内，通知区域图标作为可选的主界面入口。任务栏拥挤或前台应用全屏时，电量文字可能隐藏；布局恢复后会重新计算位置。再次运行 EXE 可打开已有实例的设置面板，即使通知区域图标已关闭也可使用。
 
@@ -68,7 +68,7 @@ AULA Device       ~65%
 %LOCALAPPDATA%\BatterySentry\settings.ini
 ```
 
-配置同时保存 `window_width`、`window_height`，单位为逻辑像素。边框拖拽缩放改变可用空间，不放大字体。面板支持滚轮、滚动条、方向键、Page Up/Down、Home/End；Tab 切换按钮，Enter/空格激活，Escape 先关闭选项卡、再关闭面板。
+配置同时保存 `window_width`、`window_height`，单位为逻辑像素。边框拖拽缩放改变可用空间，不放大字体。面板支持滚轮、滚动条、方向键、Page Up/Down、Home/End；Tab 切换按钮，Enter/空格激活，Escape 从设置页返回设备页，在设备页隐藏面板。
 
 `show_tray_icon=1` 表示显示通知区域图标，`0` 表示隐藏。旧配置没有该项时默认显示。单实例按 Windows 窗口站和桌面隔离，开发工具的隔离桌面不会阻止普通桌面启动；重复运行 `--background` 保持静默，普通双击明确打开面板。
 
@@ -128,7 +128,7 @@ cargo build --release --locked
 python tools/taskbar_smoke.py
 ```
 
-该脚本使用模拟任务栏和独立进程的 LiteMonitor 形状窗口，检查布局、窗口焦点切换和程序退出。Python 只用于开发检查，运行 BatterySentry 不需要 Python。截图等检查产物写入 `artifacts/`，不会提交到仓库。
+该脚本使用模拟任务栏和独立进程的 LiteMonitor 形状窗口，检查布局、窗口焦点切换和程序退出。这些工具脚本保留在本地并由 Git 忽略。Python 只用于开发检查，运行 BatterySentry 不需要 Python。截图等检查产物写入 `artifacts/`，不会提交到仓库。
 
 模拟任务栏检查不能替代真实 Explorer 桌面验证。`tools/smoke.py` 包含旧版通知区域检查及截图辅助代码，当前版本应使用 `tools/taskbar_smoke.py`。目前没有长期运行资源占用的测量结论。
 
@@ -137,32 +137,31 @@ python tools/taskbar_smoke.py
 ```text
 BatterySentry/
 ├── assets/                 # 图标源文件、ICO 和 Windows 资源定义
-├── docs/
-│   ├── PROTOCOL.md         # 接收器协议与参考资料
-│   └── TASKBAR.md          # 任务栏布局方案和验证限制
 ├── src/
 │   ├── main.rs             # 入口与命令行参数
-│   ├── panel.rs            # 可缩放布局、虚拟列表与交互状态
+│   ├── panel.rs            # 设备页、设置页、虚拟列表与交互状态
 │   ├── app.rs              # 原生界面与应用生命周期
 │   ├── config.rs           # 刷新间隔配置
 │   ├── drivers.rs          # 设备驱动注册、扫描与缓存
 │   ├── hid.rs              # Windows HID 传输
 │   ├── protocol.rs         # 协议请求与响应解析
 │   ├── startup.rs          # 开机自启快捷方式
+│   ├── theme.rs            # 面板和任务栏配色
 │   ├── taskbar.rs          # 任务栏显示与布局
 │   ├── tray.rs             # 可选通知区域图标与右键菜单
 │   └── win.rs              # Win32 辅助函数
-├── tools/                  # 开发检查脚本
+├── tools/                  # 本地开发检查脚本，Git 忽略
 ├── build.rs                # Windows 资源编译
 ├── Cargo.toml
 ├── Cargo.lock
-├── PORTING.md              # 移植与设计记录
+├── ARCHITECTURE.md         # 当前架构说明
+├── UI_REDESIGN.md          # 界面改版与实现说明
 └── README.MD
 ```
 
 新增设备时，在 `src/drivers.rs` 中实现 `DeviceDriver` 并加入 `registry()`，在 `src/protocol.rs` 中添加经过验证的协议编解码。请精确匹配接收器 VID/PID、Usage 和报告长度，并为响应校验添加测试。
 
-型号识别的命令、来源及当前验证限制见 [协议说明](docs/PROTOCOL.md)，本次界面行为见 [界面说明](docs/PANEL.md)。
+实现结构见 [架构说明](ARCHITECTURE.md)，界面结构和状态映射见 [界面改版说明](UI_REDESIGN.md)。
 
 ## 已知限制与排查
 
@@ -171,4 +170,4 @@ BatterySentry/
 - **提示找不到 `rc.exe` 或链接器**：检查 Visual Studio C++ Build Tools 和 Windows SDK 是否安装完整，必要时在 Visual Studio 开发者 PowerShell 中构建。
 - **与其他任务栏组件的兼容性**：布局依赖 Explorer 窗口和 UI Automation 信息，实际效果可能随 Windows 版本或第三方组件变化。
 
-更多细节见 [任务栏实现说明](docs/TASKBAR.md)、[接收器协议说明](docs/PROTOCOL.md) 和 [移植记录](PORTING.md)。
+更多细节见 [架构说明](ARCHITECTURE.md) 和 [界面改版说明](UI_REDESIGN.md)。

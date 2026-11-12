@@ -76,6 +76,7 @@ pub fn context_menu(host: HWND) -> u32 {
         }
         AppendMenuW(menu, MF_STRING, 1, wide("Open BatterySentry").as_ptr());
         AppendMenuW(menu, MF_STRING, 2, wide("Refresh").as_ptr());
+        AppendMenuW(menu, MF_STRING, 4, wide("Settings").as_ptr());
         AppendMenuW(menu, MF_SEPARATOR, 0, ptr::null());
         AppendMenuW(menu, MF_STRING, 3, wide("Exit").as_ptr());
         let mut position = POINT::default();

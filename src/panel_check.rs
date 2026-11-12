@@ -105,7 +105,7 @@ fn snapshot(hwnd: HWND, path: &Path) {
 
 #[test]
 #[ignore = "requires LOCALAPPDATA under artifacts/ui-check; opens one temporary native window"]
-fn native_resize_hover_dropdown_and_virtual_scroll() {
+fn native_resize_hover_settings_and_virtual_scroll() {
     let root = std::env::current_dir()
         .expect("crate directory")
         .join("artifacts/ui-check");
@@ -118,12 +118,12 @@ fn native_resize_hover_dropdown_and_virtual_scroll() {
     let mut initial = App::new();
     initial.dpi = 96;
     initial.cfg = Config::default();
-    initial.ui = Panel::new(460, 530, false);
+    initial.ui = Panel::new(460, 504, false);
     initial.layout_status.clear();
     initial.readings = (0..8)
         .map(|i| Reading {
             device_key: format!("fixture-{i}"),
-            last_known: None,
+            last_known: (i == 2).then_some(BatteryValue::Percent(65)),
             name: if i == 0 {
                 "ATK A9 Plus NK — Long device name for resize alignment".into()
             } else if i == 1 {
@@ -132,8 +132,17 @@ fn native_resize_hover_dropdown_and_virtual_scroll() {
                 format!("ATK Device {}", i + 1)
             },
             identity: String::new(),
-            value: Some(BatteryValue::Percent(83 - i * 9)),
-            detail: "Connected via 2.4 GHz".into(),
+            value: match i {
+                1 => Some(BatteryValue::Percent(24)),
+                2 => None,
+                3 => Some(BatteryValue::Charging),
+                _ => Some(BatteryValue::Percent(83 - i * 9)),
+            },
+            detail: if i == 2 {
+                "Last read 32s ago · wake the device and refresh".into()
+            } else {
+                "Connected via 2.4 GHz".into()
+            },
         })
         .collect();
     let app = Box::new(RefCell::new(initial));
@@ -160,7 +169,7 @@ fn native_resize_hover_dropdown_and_virtual_scroll() {
             50,
             50,
             460,
-            530,
+            504,
             ptr::null_mut(),
             ptr::null_mut(),
             hinst,
@@ -203,7 +212,7 @@ fn native_resize_hover_dropdown_and_virtual_scroll() {
         );
         pump();
         assert_eq!(app.borrow().ui.width, 900);
-        assert_eq!(app.borrow().ui.visible(8), 0..5);
+        assert_eq!(app.borrow().ui.visible(8), 0..6);
         snapshot(hwnd, &root.join("wide.bmp"));
         let mut p = POINT { x: 400, y: 200 };
         ClientToScreen(hwnd, &mut p);
@@ -214,15 +223,17 @@ fn native_resize_hover_dropdown_and_virtual_scroll() {
             point(p.x, p.y),
         );
         assert!(app.borrow().ui.scroll > 0);
-        let interval = app.borrow().ui.bounds(Control::Interval);
-        click(hwnd, interval);
+        let settings = app.borrow().ui.bounds(Control::Settings);
+        click(hwnd, settings);
         pump();
-        assert!(app.borrow().ui.dropdown);
-        snapshot(hwnd, &root.join("wide-dropdown.bmp"));
+        assert_eq!(app.borrow().ui.page, Page::Settings);
+        snapshot(hwnd, &root.join("settings.bmp"));
         let option = app.borrow().ui.bounds(Control::Option(4));
         click(hwnd, option);
         assert_eq!(app.borrow().cfg.interval, 600);
-        assert!(!app.borrow().ui.dropdown);
+        let back = app.borrow().ui.bounds(Control::Back);
+        click(hwnd, back);
+        assert_eq!(app.borrow().ui.page, Page::Devices);
         SendMessageW(hwnd, WM_MOUSEMOVE, 0, point(100, 250));
         pump();
         snapshot(hwnd, &root.join("wide-scrolled.bmp"));
@@ -245,6 +256,8 @@ fn native_resize_hover_dropdown_and_virtual_scroll() {
             0,
             "explicit open must restore a hidden panel"
         );
+        let settings = app.borrow().ui.bounds(Control::Settings);
+        click(hwnd, settings);
         let tray_toggle = app.borrow().ui.bounds(Control::Tray);
         click(hwnd, tray_toggle);
         assert!(!app.borrow().cfg.show_tray_icon);

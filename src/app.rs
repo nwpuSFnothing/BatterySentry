@@ -2,9 +2,11 @@
 use crate::{
     config::{Config, INTERVALS},
     drivers::{self, Reading},
-    panel::{self, Bounds, Control, Panel},
+    panel::{self, Bounds, Control, Page, Panel},
     protocol::BatteryValue,
-    startup, taskbar, tray,
+    startup, taskbar,
+    theme::{Theme, rgb},
+    tray,
     win::{Handle, desktop_instance_name, error, wide},
 };
 use std::{
@@ -35,14 +37,7 @@ const WM_RESULTS: u32 = WM_APP + 2;
 const WM_OPEN: u32 = WM_APP + 3;
 const WM_EXIT: u32 = WM_APP + 4;
 const NIN_KEYSELECT: u32 = NIN_SELECT | NINF_KEY;
-const BG: u32 = rgb(17, 21, 28);
-const CARD: u32 = rgb(26, 32, 42);
-const TEXT: u32 = rgb(235, 240, 247);
-const MUTED: u32 = rgb(145, 158, 178);
-const ACCENT: u32 = rgb(32, 138, 96);
-const fn rgb(r: u32, g: u32, b: u32) -> u32 {
-    r | (g << 8) | (b << 16)
-}
+const THEME: Theme = Theme::LIGHT;
 fn blend(from: u32, to: u32, amount: f32) -> u32 {
     let channel = |shift: u32| {
         let a = ((from >> shift) & 255u32) as f32;
@@ -367,18 +362,18 @@ impl App {
             let old = SelectObject(dc, bitmap);
             let c = Canvas(dc);
             c.fill(0, 0, rect.right, rect.bottom, taskbar_key());
+            let theme = if light_taskbar() {
+                Theme::LIGHT
+            } else {
+                Theme::DARK
+            };
             let half = rect.bottom / 2;
             let font = (16 * self.widget_dpi as i32 / 96).min(half - 2).max(8);
-            let text_color = if light_taskbar() {
-                rgb(25, 30, 38)
-            } else {
-                TEXT
-            };
             let mut rows: Vec<_> = self
                 .readings
                 .iter()
                 .take(2)
-                .map(|r| (r.name.clone(), r.value_text(), color(r.value)))
+                .map(|r| (r.name.clone(), r.value_text(), reading_status(r, theme).1))
                 .collect();
             if self.readings.len() > 2
                 && let Some(last) = rows.last_mut()
@@ -386,7 +381,7 @@ impl App {
                 last.0 = format!("{} (+{})", last.0, self.readings.len() - 2);
             }
             if rows.is_empty() {
-                rows.push(("BatterySentry".into(), "--".into(), MUTED));
+                rows.push(("BatterySentry".into(), "--".into(), theme.muted));
             }
             let pad = scale(2, self.widget_dpi);
             let gap = scale(4, self.widget_dpi);
@@ -406,9 +401,17 @@ impl App {
                 .min((rect.right - 2 * pad - gap - value_width).max(1));
             let name_x = (rect.right - pad - value_width - gap - name_width).max(pad);
             let value_x = name_x + name_width + gap;
+            c.round(
+                name_x - pad,
+                0,
+                rect.right - name_x + pad,
+                rect.bottom,
+                scale(10, self.widget_dpi),
+                theme.surface,
+            );
             for (row, (name, value, value_color)) in rows.iter().enumerate() {
                 let y = row as i32 * half;
-                c.text(name, name_x, y, name_width, half, font, 700, text_color);
+                c.text(name, name_x, y, name_width, half, font, 700, theme.text);
                 c.right(
                     value,
                     Bounds {
@@ -533,7 +536,6 @@ impl App {
                 self.ui.clamp_scroll(self.readings.len());
             }
         }
-        self.ui.dropdown = false;
         self.invalidate();
     }
     fn save_panel_size(&mut self) {
@@ -571,7 +573,6 @@ impl App {
     }
     fn hide_panel(&mut self) {
         self.save_panel_size();
-        self.ui.dropdown = false;
         self.ui.hovered = None;
         self.ui.pressed = None;
         self.ui.focused = None;
@@ -580,11 +581,13 @@ impl App {
         // SAFETY: no destruction; close retains the running background application.
         unsafe {
             KillTimer(self.panel, panel::ANIMATION_TIMER);
+            KillTimer(self.panel, 6);
             ReleaseCapture();
             ShowWindow(self.panel, SW_HIDE);
         }
     }
     fn open_panel(&mut self) {
+        self.ui.show_page(Page::Devices);
         // SAFETY: panel allocation and HWND mutations all run on this thread.
         unsafe {
             self.startup = startup::enabled();
@@ -621,7 +624,7 @@ impl App {
                     (&corner as *const i32).cast(),
                     4,
                 );
-                let border = rgb(48, 59, 75);
+                let border = THEME.border;
                 DwmSetWindowAttribute(
                     self.panel,
                     DWMWA_BORDER_COLOR as u32,
@@ -636,6 +639,7 @@ impl App {
             // Consume that startup setting, then explicitly restore the user-requested panel.
             ShowWindow(self.panel, SW_SHOW);
             ShowWindow(self.panel, SW_RESTORE);
+            SetTimer(self.panel, 6, 1000, None);
             SetForegroundWindow(self.panel);
             self.invalidate();
         }
@@ -685,19 +689,6 @@ impl App {
                 self.ui.tray_target = next.show_tray_icon;
                 self.animate();
             }
-            Control::Interval => {
-                self.ui.dropdown = !self.ui.dropdown;
-                self.ui.focused = if self.ui.dropdown {
-                    Some(Control::Option(
-                        INTERVALS
-                            .iter()
-                            .position(|n| *n == self.cfg.interval)
-                            .unwrap_or(1),
-                    ))
-                } else {
-                    Some(Control::Interval)
-                };
-            }
             Control::Option(index) => {
                 if let Some(interval) = INTERVALS.get(index) {
                     let next = Config {
@@ -713,8 +704,8 @@ impl App {
                     unsafe {
                         SetTimer(self.host, 1, *interval * 1000, None);
                     }
-                    self.ui.dropdown = false;
-                    self.ui.focused = Some(Control::Interval);
+
+                    self.ui.focused = Some(Control::Option(index));
                 }
             }
             Control::Refresh => {
@@ -729,6 +720,8 @@ impl App {
                     PostMessageW(self.host, WM_EXIT, 0, 0);
                 }
             }
+            Control::Settings => self.ui.show_page(Page::Settings),
+            Control::Back => self.ui.show_page(Page::Devices),
             Control::Scrollbar => {}
         }
         self.invalidate();
@@ -766,14 +759,6 @@ impl App {
         }
     }
     fn pointer_down(&mut self, x: i32, y: i32) {
-        if self.ui.dropdown
-            && !self.ui.menu_bounds().contains(x, y)
-            && !self.ui.bounds(Control::Interval).contains(x, y)
-        {
-            self.ui.dropdown = false;
-            self.invalidate();
-            return;
-        }
         let control = self.ui.hit(x, y, self.readings.len());
         self.ui.pressed = control;
         self.ui.focused = control;
@@ -783,12 +768,13 @@ impl App {
             if thumb.contains(x, y) {
                 self.ui.drag_offset = Some(y - thumb.y);
             } else {
-                self.ui.scroll += if y < thumb.y {
+                let step = if y < thumb.y {
                     -self.ui.list_height()
                 } else {
                     self.ui.list_height()
                 };
-                self.ui.clamp_scroll(self.readings.len());
+                self.ui
+                    .set_scroll(self.ui.scroll_offset() + step, self.readings.len());
             }
         }
         // SAFETY: capture pairs with release on button-up/cancel.
@@ -816,27 +802,15 @@ impl App {
     fn key(&mut self, key: usize) {
         match key as u16 {
             VK_ESCAPE => {
-                if self.ui.dropdown {
-                    self.ui.dropdown = false;
+                if self.ui.page == Page::Settings {
+                    self.ui.show_page(Page::Devices);
                     self.invalidate();
                 } else {
                     self.hide_panel();
                 }
             }
             VK_TAB => {
-                let controls: Vec<_> = if self.ui.dropdown {
-                    (0..6).map(Control::Option).collect()
-                } else {
-                    vec![
-                        Control::Minimize,
-                        Control::Close,
-                        Control::Startup,
-                        Control::Tray,
-                        Control::Interval,
-                        Control::Refresh,
-                        Control::Exit,
-                    ]
-                };
+                let controls = self.ui.controls();
                 let current = controls.iter().position(|c| Some(*c) == self.ui.focused);
                 // SAFETY: reads current modifier state, no pointer arguments.
                 let backwards = unsafe { GetKeyState(VK_SHIFT as i32) < 0 };
@@ -847,7 +821,9 @@ impl App {
                         (i + 1) % controls.len()
                     }
                 });
-                self.ui.focused = Some(controls[next]);
+                let control = controls[next];
+                self.ui.focused = Some(control);
+                self.ui.ensure_visible(control, self.readings.len());
                 self.invalidate();
             }
             VK_RETURN | VK_SPACE => {
@@ -855,29 +831,34 @@ impl App {
                     self.activate_control(control);
                 }
             }
-            VK_UP | VK_DOWN | VK_LEFT | VK_RIGHT if self.ui.dropdown => {
-                let index = match self.ui.focused {
-                    Some(Control::Option(i)) => i,
-                    _ => 0,
+            VK_UP | VK_DOWN | VK_LEFT | VK_RIGHT
+                if self.ui.page == Page::Settings
+                    && matches!(self.ui.focused, Some(Control::Option(_))) =>
+            {
+                let Some(Control::Option(index)) = self.ui.focused else {
+                    return;
                 };
-                let step = match key as u16 {
-                    VK_UP | VK_LEFT => -1,
-                    _ => 1,
+                let step = if matches!(key as u16, VK_UP | VK_LEFT) {
+                    -1
+                } else {
+                    1
                 };
-                self.ui.focused =
-                    Some(Control::Option((index as i32 + step).rem_euclid(6) as usize));
+                let control = Control::Option((index as i32 + step).rem_euclid(6) as usize);
+                self.ui.focused = Some(control);
+                self.ui.ensure_visible(control, self.readings.len());
                 self.invalidate();
             }
             VK_UP | VK_DOWN | VK_PRIOR | VK_NEXT | VK_HOME | VK_END => {
-                self.ui.scroll = match key as u16 {
-                    VK_UP => self.ui.scroll - 48,
-                    VK_DOWN => self.ui.scroll + 48,
-                    VK_PRIOR => self.ui.scroll - self.ui.list_height(),
-                    VK_NEXT => self.ui.scroll + self.ui.list_height(),
+                let offset = self.ui.scroll_offset();
+                let next = match key as u16 {
+                    VK_UP => offset - 48,
+                    VK_DOWN => offset + 48,
+                    VK_PRIOR => offset - self.ui.list_height(),
+                    VK_NEXT => offset + self.ui.list_height(),
                     VK_HOME => 0,
                     _ => self.ui.max_scroll(self.readings.len()),
                 };
-                self.ui.clamp_scroll(self.readings.len());
+                self.ui.set_scroll(next, self.readings.len());
                 self.invalidate();
             }
             82 => self.refresh(),
@@ -891,6 +872,369 @@ impl App {
             self.ui.hover[control.index()]
         };
         blend(base, highlight, amount)
+    }
+    fn paint_header(&self, c: &Canvas) {
+        // SAFETY: shared application icon is valid for the process lifetime.
+        unsafe {
+            let icon = LoadIconW(
+                GetModuleHandleW(ptr::null()),
+                ptr::without_provenance::<u16>(1),
+            );
+            DrawIconEx(c.0, 24, 22, icon, 24, 24, 0, ptr::null_mut(), DI_NORMAL);
+        }
+        let title = match self.ui.page {
+            Page::Devices => "BatterySentry",
+            Page::Settings => "Settings",
+        };
+        c.text(title, 58, 16, self.ui.width - 148, 30, 20, 600, THEME.text);
+        let subtitle = match self.ui.page {
+            Page::Devices => "Wireless peripheral batteries",
+            Page::Settings => concat!("BatterySentry · ", env!("CARGO_PKG_VERSION")),
+        };
+        c.text(
+            subtitle,
+            24,
+            49,
+            self.ui.width - 48,
+            20,
+            12,
+            400,
+            THEME.muted,
+        );
+        for control in [Control::Minimize, Control::Close] {
+            let b = self.ui.bounds(control);
+            let highlight = if control == Control::Close {
+                rgb(220, 45, 65)
+            } else {
+                THEME.border
+            };
+            c.fill(
+                b.x,
+                b.y,
+                b.w,
+                b.h,
+                self.button_color(control, THEME.background, highlight),
+            );
+            let cx = b.x + b.w / 2;
+            let cy = b.h / 2;
+            if control == Control::Close {
+                let ink = blend(THEME.muted, THEME.surface, self.ui.hover[control.index()]);
+                c.line(cx - 5, cy - 5, cx + 5, cy + 5, ink);
+                c.line(cx + 5, cy - 5, cx - 5, cy + 5, ink);
+            } else {
+                c.line(cx - 5, cy, cx + 5, cy, THEME.text);
+            }
+        }
+    }
+    fn paint_summary(&self, c: &Canvas) {
+        c.round(24, 78, self.ui.width - 48, 64, 14, THEME.accent_soft);
+        let low = self
+            .readings
+            .iter()
+            .filter(|r| matches!(r.value, Some(BatteryValue::Percent(n)) if n <= 30))
+            .count();
+        let charging = self
+            .readings
+            .iter()
+            .filter(|r| r.value == Some(BatteryValue::Charging))
+            .count();
+        let mut summary = format!("{} devices", self.readings.len());
+        if low > 0 {
+            summary.push_str(&format!(" · {low} low"));
+        }
+        if charging > 0 {
+            summary.push_str(&format!(" · {charging} charging"));
+        }
+        c.text(
+            &summary,
+            38,
+            87,
+            self.ui.width - 76,
+            23,
+            14,
+            600,
+            THEME.text,
+        );
+        let status = if !self.scan_error.is_empty() {
+            self.scan_error.clone()
+        } else if !self.layout_status.is_empty() {
+            self.layout_status.clone()
+        } else if self.busy {
+            "Reading batteries…".into()
+        } else if let Some(last) = self.last {
+            let seconds = last.elapsed().as_secs();
+            if seconds < 5 {
+                "Scan completed just now".into()
+            } else if seconds < 60 {
+                format!("Last scan {seconds}s ago")
+            } else {
+                format!("Last scan {}m ago", seconds / 60)
+            }
+        } else {
+            "Waiting for the first scan".into()
+        };
+        c.text(
+            &status,
+            38,
+            111,
+            self.ui.width - 76,
+            21,
+            11,
+            400,
+            THEME.muted,
+        );
+    }
+    fn paint_devices(&self, c: &Canvas) {
+        let w = self.ui.width;
+        if self.readings.is_empty() {
+            let y = self.ui.content_top() + 18;
+            c.text(
+                if self.busy {
+                    "Looking for devices…"
+                } else if self.scan_error.is_empty() {
+                    "No supported devices found"
+                } else {
+                    "Could not read devices"
+                },
+                32,
+                y,
+                w - 64,
+                28,
+                16,
+                600,
+                THEME.text,
+            );
+            c.text(
+                "Connect an ATK or AULA receiver.",
+                32,
+                y + 36,
+                w - 64,
+                22,
+                12,
+                400,
+                THEME.muted,
+            );
+            c.text(
+                "Wake the device, then refresh.",
+                32,
+                y + 60,
+                w - 64,
+                22,
+                12,
+                400,
+                THEME.muted,
+            );
+        }
+        for index in self.ui.visible(self.readings.len()) {
+            let reading = &self.readings[index];
+            let y = panel::LIST_TOP + index as i32 * panel::ROW_HEIGHT - self.ui.scroll;
+            let (label, ink) = reading_status(reading, THEME);
+            c.round(24, y, w - 48, 84, 12, THEME.border);
+            c.round(25, y + 1, w - 50, 82, 11, THEME.surface);
+            c.round(36, y + 21, 32, 38, 10, THEME.surface_alt);
+            c.round(41, y + 33, 20, 13, 4, ink);
+            c.round(43, y + 35, 16, 9, 2, THEME.surface);
+            c.fill(61, y + 37, 2, 5, ink);
+            if let Some(BatteryValue::Percent(n)) = reading.value.or(reading.last_known) {
+                c.fill(44, y + 36, (14 * i32::from(n) / 100).max(1), 7, ink);
+            }
+            let value = reading.value_text();
+            let value_width = c.text_width(&value, 23, 600).max(62);
+            let value_x = w - 40 - value_width;
+            c.text(
+                &reading.name,
+                80,
+                y + 11,
+                (value_x - 92).max(1),
+                30,
+                15,
+                600,
+                THEME.text,
+            );
+            c.right(
+                &value,
+                Bounds {
+                    x: value_x,
+                    y: y + 9,
+                    w: value_width,
+                    h: 32,
+                },
+                23,
+                600,
+                ink,
+            );
+            let label_width = c.text_width(label, 10, 600) + 18;
+            let label_x = w - 40 - label_width;
+            c.round(
+                label_x,
+                y + 49,
+                label_width,
+                22,
+                11,
+                blend(THEME.surface, ink, 0.09),
+            );
+            c.text(
+                label,
+                label_x + 9,
+                y + 49,
+                label_width - 18,
+                22,
+                10,
+                600,
+                ink,
+            );
+            c.text(
+                &reading.detail,
+                80,
+                y + 49,
+                (label_x - 92).max(1),
+                22,
+                11,
+                400,
+                THEME.muted,
+            );
+        }
+    }
+    fn paint_settings(&self, c: &Canvas) {
+        for (control, label, amount) in [
+            (Control::Startup, "Launch at sign-in", self.ui.switch),
+            (Control::Tray, "Show tray icon", self.ui.tray_switch),
+        ] {
+            let b = self.ui.bounds(control);
+            c.round(b.x, b.y, b.w, b.h, 12, THEME.border);
+            c.round(
+                b.x + 1,
+                b.y + 1,
+                b.w - 2,
+                b.h - 2,
+                11,
+                self.button_color(control, THEME.surface, THEME.surface_alt),
+            );
+            c.text(label, b.x + 14, b.y, b.w - 82, b.h, 13, 500, THEME.text);
+            let x = b.x + b.w - 54;
+            c.round(
+                x,
+                b.y + 15,
+                38,
+                22,
+                22,
+                blend(THEME.border, THEME.accent, amount),
+            );
+            c.round(
+                x + 3 + (16.0 * amount).round() as i32,
+                b.y + 18,
+                16,
+                16,
+                16,
+                THEME.surface,
+            );
+        }
+        let y = self.ui.bounds(Control::Option(0)).y;
+        c.text(
+            "Refresh interval",
+            24,
+            y - 34,
+            self.ui.width - 48,
+            26,
+            13,
+            600,
+            THEME.text,
+        );
+        for (index, interval) in INTERVALS.iter().enumerate() {
+            let control = Control::Option(index);
+            let b = self.ui.bounds(control);
+            let selected = self.cfg.interval == *interval;
+            let base = if selected {
+                THEME.accent_soft
+            } else {
+                THEME.surface
+            };
+            c.round(
+                b.x,
+                b.y,
+                b.w,
+                b.h,
+                9,
+                self.button_color(control, base, THEME.surface_alt),
+            );
+            let ink = if selected { THEME.accent } else { THEME.muted };
+            c.round(b.x + 13, b.y + 9, 14, 14, 14, ink);
+            c.round(b.x + 15, b.y + 11, 10, 10, 10, base);
+            if selected {
+                c.round(b.x + 18, b.y + 14, 4, 4, 4, ink);
+            }
+            c.text(
+                &interval_label(*interval),
+                b.x + 38,
+                b.y,
+                b.w - 52,
+                b.h,
+                12,
+                500,
+                THEME.text,
+            );
+        }
+        let about_y = self.ui.bounds(Control::Option(5)).y + 44;
+        c.text(
+            "Supported receivers · ATK / AULA",
+            24,
+            about_y,
+            self.ui.width - 48,
+            22,
+            11,
+            400,
+            THEME.muted,
+        );
+    }
+    fn paint_actions(&self, c: &Canvas) {
+        let f = self.ui.footer();
+        c.fill(24, f, self.ui.width - 48, 1, THEME.border);
+        let actions = match self.ui.page {
+            Page::Devices => [
+                (
+                    Control::Refresh,
+                    if self.busy {
+                        "Reading…"
+                    } else {
+                        "Refresh now"
+                    },
+                ),
+                (Control::Settings, "Settings"),
+            ],
+            Page::Settings => [(Control::Back, "Back"), (Control::Exit, "Exit app")],
+        };
+        for (control, label) in actions {
+            let b = self.ui.bounds(control);
+            let primary = control == Control::Refresh;
+            let base = if primary { THEME.accent } else { THEME.surface };
+            let highlight = if primary {
+                THEME.accent_hover
+            } else {
+                THEME.border
+            };
+            c.round(
+                b.x,
+                b.y,
+                b.w,
+                b.h,
+                10,
+                self.button_color(control, base, highlight),
+            );
+            c.text(
+                label,
+                b.x + 14,
+                b.y,
+                b.w - 28,
+                b.h,
+                13,
+                600,
+                if primary { THEME.surface } else { THEME.text },
+            );
+        }
+    }
+    fn paint_focus(&self, c: &Canvas, control: Control) {
+        let b = self.ui.bounds(control);
+        c.fill(b.x + 8, b.y + b.h - 3, (b.w - 16).max(1), 2, THEME.accent);
     }
     fn paint(&self, hwnd: HWND) {
         // SAFETY: all GDI resources are local, restored and released after painting.
@@ -921,291 +1265,50 @@ impl App {
             SetWindowExtEx(dc, self.ui.width, self.ui.height, ptr::null_mut());
             SetViewportExtEx(dc, rect.right, rect.bottom, ptr::null_mut());
             let c = Canvas(dc);
-            let w = self.ui.width;
-            let h = self.ui.height;
-            c.fill(0, 0, w, h, BG);
-            let icon = LoadIconW(
-                GetModuleHandleW(ptr::null()),
-                ptr::without_provenance::<u16>(1),
-            );
-            DrawIconEx(dc, 24, 21, icon, 24, 24, 0, ptr::null_mut(), DI_NORMAL);
-            c.text("BatterySentry", 58, 18, w - 156, 28, 20, 600, TEXT);
-            c.text(
-                &format!("{} devices · 2.4 GHz", self.readings.len()),
-                24,
-                53,
-                w - 48,
-                20,
-                12,
-                400,
-                MUTED,
-            );
-            let status = if !self.scan_error.is_empty() {
-                &self.scan_error
-            } else {
-                &self.layout_status
-            };
-            c.text(status, 24, 77, w - 48, 16, 10, 400, MUTED);
-            for control in [Control::Minimize, Control::Close] {
-                let b = self.ui.bounds(control);
-                let highlight = if control == Control::Close {
-                    rgb(220, 45, 65)
-                } else {
-                    rgb(54, 65, 80)
-                };
-                c.fill(
-                    b.x,
-                    b.y,
-                    b.w,
-                    b.h,
-                    self.button_color(control, BG, highlight),
-                );
-                let cx = b.x + b.w / 2;
-                let cy = b.h / 2;
-                if control == Control::Close {
-                    let ink = blend(MUTED, rgb(255, 255, 255), self.ui.hover[control.index()]);
-                    c.line(cx - 5, cy - 5, cx + 5, cy + 5, ink);
-                    c.line(cx + 5, cy - 5, cx - 5, cy + 5, ink);
-                } else {
-                    c.line(cx - 5, cy, cx + 5, cy, TEXT);
-                }
+            c.fill(0, 0, self.ui.width, self.ui.height, THEME.background);
+            self.paint_header(&c);
+            if self.ui.page == Page::Devices {
+                self.paint_summary(&c);
             }
-            // Clip list rendering so partial virtual rows never cover header/footer.
             let saved = SaveDC(dc);
-            IntersectClipRect(dc, 16, panel::LIST_TOP, w - 16, self.ui.footer());
-            if self.readings.is_empty() {
-                c.text(
-                    if self.busy {
-                        "Looking for devices…"
-                    } else if self.scan_error.is_empty() {
-                        "No supported devices connected"
-                    } else {
-                        "Could not read devices"
-                    },
-                    24,
-                    panel::LIST_TOP + 22,
-                    w - 48,
-                    26,
-                    16,
-                    500,
-                    TEXT,
-                );
-                c.text(
-                    "Connect a receiver, wake your device, then refresh.",
-                    24,
-                    panel::LIST_TOP + 54,
-                    w - 48,
-                    24,
-                    11,
-                    400,
-                    MUTED,
-                );
+            IntersectClipRect(
+                dc,
+                16,
+                self.ui.content_top(),
+                self.ui.width - 16,
+                self.ui.footer(),
+            );
+            match self.ui.page {
+                Page::Devices => self.paint_devices(&c),
+                Page::Settings => self.paint_settings(&c),
             }
-            for index in self.ui.visible(self.readings.len()) {
-                let r = &self.readings[index];
-                let y = panel::LIST_TOP + index as i32 * panel::ROW_HEIGHT - self.ui.scroll;
-                let value = r.value_text();
-                let value_width = c.text_width(&value, 22, 600).max(78);
-                c.text(
-                    &r.name,
-                    24,
-                    y + 8,
-                    (w - 64 - value_width).max(1),
-                    30,
-                    17,
-                    500,
-                    TEXT,
-                );
-                c.right(
-                    &value,
-                    Bounds {
-                        x: w - 24 - value_width,
-                        y: y + 8,
-                        w: value_width,
-                        h: 30,
-                    },
-                    22,
-                    600,
-                    color(r.value),
-                );
-                c.text(&r.detail, 24, y + 42, w - 48, 20, 11, 400, MUTED);
-                c.fill(24, y + 74, w - 48, 1, CARD);
+            if let Some(control) = self.ui.focused
+                && matches!(
+                    control,
+                    Control::Startup | Control::Tray | Control::Option(_)
+                )
+            {
+                self.paint_focus(&c, control);
             }
             RestoreDC(dc, saved);
             if let Some(thumb) = self.ui.thumb(self.readings.len()) {
-                let track = self.ui.bounds(Control::Scrollbar);
-                c.round(track.x, track.y, track.w, track.h, 8, BG);
                 c.round(
                     thumb.x,
                     thumb.y,
                     thumb.w,
                     thumb.h,
                     6,
-                    self.button_color(Control::Scrollbar, rgb(57, 68, 83), rgb(105, 121, 141)),
+                    self.button_color(Control::Scrollbar, THEME.border, THEME.muted),
                 );
             }
-            let f = self.ui.footer();
-            c.fill(24, f, w - 48, 1, CARD);
-            for (control, label, amount) in [
-                (Control::Startup, "Launch at sign-in", self.ui.switch),
-                (Control::Tray, "Tray icon", self.ui.tray_switch),
-            ] {
-                let b = self.ui.bounds(control);
-                c.round(b.x, b.y, b.w, b.h, 10, self.button_color(control, BG, CARD));
-                c.text(label, b.x + 8, f + 13, b.w - 56, 26, 12, 400, TEXT);
-                let x = b.x + b.w - 44;
-                c.round(
-                    x,
-                    f + 20,
-                    36,
-                    20,
-                    20,
-                    blend(rgb(57, 66, 82), ACCENT, amount),
-                );
-                c.round(
-                    x + 3 + (16.0 * amount).round() as i32,
-                    f + 23,
-                    14,
-                    14,
-                    14,
-                    TEXT,
-                );
-            }
-            c.text("Refresh interval", 24, f + 67, w - 204, 26, 13, 400, TEXT);
-            let b = self.ui.bounds(Control::Interval);
-            c.round(
-                b.x,
-                b.y,
-                b.w,
-                b.h,
-                10,
-                self.button_color(Control::Interval, CARD, rgb(44, 59, 72)),
-            );
-            c.text(
-                &interval_label(self.cfg.interval),
-                b.x + 14,
-                b.y,
-                b.w - 42,
-                b.h,
-                13,
-                500,
-                TEXT,
-            );
-            let cy = b.y + b.h / 2;
-            let sign = if self.ui.dropdown { -1 } else { 1 };
-            c.line(
-                b.x + b.w - 25,
-                cy - sign * 2,
-                b.x + b.w - 21,
-                cy + sign * 2,
-                MUTED,
-            );
-            c.line(
-                b.x + b.w - 21,
-                cy + sign * 2,
-                b.x + b.w - 17,
-                cy - sign * 2,
-                MUTED,
-            );
-            for control in [Control::Refresh, Control::Exit] {
-                let b = self.ui.bounds(control);
-                let (base, highlight, text) = if control == Control::Refresh {
-                    (
-                        ACCENT,
-                        rgb(43, 169, 119),
-                        if self.busy { "Reading…" } else { "Refresh" },
-                    )
-                } else {
-                    (CARD, rgb(51, 64, 80), "Exit")
-                };
-                c.round(
-                    b.x,
-                    b.y,
-                    b.w,
-                    b.h,
-                    12,
-                    self.button_color(control, base, highlight),
-                );
-                c.text(
-                    text,
-                    b.x + 16,
-                    b.y,
-                    b.w - 32,
-                    b.h,
-                    13,
-                    600,
-                    if control == Control::Refresh {
-                        BG
-                    } else {
-                        TEXT
-                    },
-                );
-            }
-            if self.ui.dropdown {
-                let menu = self.ui.menu_bounds();
-                c.round(
-                    menu.x - 1,
-                    menu.y - 1,
-                    menu.w + 2,
-                    menu.h + 2,
-                    14,
-                    rgb(57, 73, 89),
-                );
-                c.round(menu.x, menu.y, menu.w, menu.h, 14, rgb(24, 31, 41));
-                c.text(
-                    "Refresh every",
-                    menu.x + 12,
-                    menu.y + 4,
-                    menu.w - 24,
-                    23,
-                    11,
-                    500,
-                    MUTED,
-                );
-                for (index, interval) in INTERVALS.iter().enumerate() {
-                    let control = Control::Option(index);
-                    let b = self.ui.bounds(control);
-                    let selected = self.cfg.interval == *interval;
-                    c.round(
-                        b.x,
-                        b.y,
-                        b.w,
-                        b.h,
-                        8,
-                        self.button_color(
-                            control,
-                            if selected {
-                                rgb(27, 68, 55)
-                            } else {
-                                rgb(32, 41, 53)
-                            },
-                            rgb(52, 72, 83),
-                        ),
-                    );
-                    c.text(
-                        &interval_label(*interval),
-                        b.x + 10,
-                        b.y,
-                        b.w - 20,
-                        b.h,
-                        12,
-                        500,
-                        if selected { rgb(94, 223, 165) } else { TEXT },
-                    );
-                }
-            }
+            self.paint_actions(&c);
             if let Some(control) = self.ui.focused
-                && control != Control::Scrollbar
-                && (!matches!(control, Control::Option(_)) || self.ui.dropdown)
+                && !matches!(
+                    control,
+                    Control::Startup | Control::Tray | Control::Option(_) | Control::Scrollbar
+                )
             {
-                let b = self.ui.bounds(control);
-                c.fill(
-                    b.x + 8,
-                    b.y + b.h - 3,
-                    (b.w - 16).max(1),
-                    1,
-                    rgb(105, 174, 155),
-                );
+                self.paint_focus(&c, control);
             }
             SetMapMode(dc, MM_TEXT);
             BitBlt(target, 0, 0, rect.right, rect.bottom, dc, 0, 0, SRCCOPY);
@@ -1227,12 +1330,14 @@ fn interval_label(n: u32) -> String {
         format!("{} min", n / 60)
     }
 }
-fn color(value: Option<BatteryValue>) -> u32 {
-    match value {
-        Some(BatteryValue::Percent(n)) if n < 30 => rgb(249, 115, 123),
-        Some(BatteryValue::Percent(n)) if n < 60 => rgb(244, 197, 103),
-        Some(_) => ACCENT,
-        None => MUTED,
+fn reading_status(reading: &Reading, theme: Theme) -> (&'static str, u32) {
+    match reading.value {
+        Some(BatteryValue::Percent(n)) if n <= 10 => ("Critical", theme.danger),
+        Some(BatteryValue::Percent(n)) if n <= 30 => ("Low battery", theme.warning),
+        Some(BatteryValue::Percent(_)) => ("Healthy", theme.success),
+        Some(BatteryValue::Charging) => ("Charging", theme.accent),
+        None if reading.last_known.is_some() => ("Cached", theme.muted),
+        None => ("No reading", theme.muted),
     }
 }
 
@@ -1348,7 +1453,7 @@ impl Canvas {
                 CLIP_DEFAULT_PRECIS as u32,
                 CLEARTYPE_QUALITY as u32,
                 DEFAULT_PITCH as u32,
-                wide("Microsoft YaHei").as_ptr(),
+                wide("Segoe UI").as_ptr(),
             );
             let old = SelectObject(self.0, font);
             let text = wide(text);
@@ -1402,7 +1507,7 @@ impl Canvas {
                 CLIP_DEFAULT_PRECIS as u32,
                 CLEARTYPE_QUALITY as u32,
                 DEFAULT_PITCH as u32,
-                wide("Microsoft YaHei").as_ptr(),
+                wide("Segoe UI").as_ptr(),
             );
             let old = SelectObject(self.0, font);
             SetBkMode(self.0, TRANSPARENT as i32);
@@ -1466,6 +1571,11 @@ unsafe extern "system" fn procedure(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
                     1 => app.open_panel(),
                     2 => app.refresh(),
                     3 => app.activate_control(Control::Exit),
+                    4 => {
+                        app.open_panel();
+                        app.ui.show_page(Page::Settings);
+                        app.invalidate();
+                    }
                     _ => {}
                 }
             }
@@ -1524,8 +1634,12 @@ unsafe extern "system" fn procedure(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
             WM_SIZE if hwnd == app.panel => {
                 if wp != SIZE_MINIMIZED as usize {
                     app.update_panel_size();
+                    if IsWindowVisible(hwnd) != 0 {
+                        SetTimer(hwnd, 6, 1000, None);
+                    }
                 } else {
                     KillTimer(hwnd, panel::ANIMATION_TIMER);
+                    KillTimer(hwnd, 6);
                 }
                 return 0;
             }
@@ -1600,7 +1714,7 @@ unsafe extern "system" fn procedure(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
                 };
                 ScreenToClient(hwnd, &mut p);
                 let y = p.y * 96 / app.dpi as i32;
-                if !app.ui.dropdown && (panel::LIST_TOP..app.ui.footer()).contains(&y) {
+                if (app.ui.content_top()..app.ui.footer()).contains(&y) {
                     let count = app.readings.len();
                     app.ui.wheel((wp >> 16) as u16 as i16 as i32, count);
                 }
@@ -1638,6 +1752,13 @@ unsafe extern "system" fn procedure(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
             }
             taskbar::WM_LAYOUT => {
                 app.apply_layout();
+                return 0;
+            }
+            WM_TIMER if hwnd == app.panel && wp == 6 => {
+                if app.ui.page == Page::Devices && IsWindowVisible(hwnd) != 0 && IsIconic(hwnd) == 0
+                {
+                    app.invalidate();
+                }
                 return 0;
             }
             WM_TIMER if hwnd == app.panel && wp == panel::ANIMATION_TIMER => {
@@ -1721,7 +1842,6 @@ unsafe extern "system" fn procedure(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
                 app.invalidate();
             }
             WM_ACTIVATE if hwnd == app.panel => {
-                app.ui.dropdown = false;
                 app.ui.hovered = None;
                 app.ui.pressed = None;
                 app.animate();

@@ -12,7 +12,7 @@ impl Default for Config {
         Self {
             interval: 60,
             window_width: 460,
-            window_height: 530,
+            window_height: 504,
             show_tray_icon: true,
         }
     }
@@ -43,7 +43,7 @@ impl Config {
         Self {
             interval,
             window_width: dimension("window_width=", 460, 360),
-            window_height: dimension("window_height=", 530, 370),
+            window_height: dimension("window_height=", 504, 370),
             show_tray_icon: text
                 .lines()
                 .find_map(|line| line.strip_prefix("show_tray_icon="))
