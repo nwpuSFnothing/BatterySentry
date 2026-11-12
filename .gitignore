@@ -30,6 +30,7 @@ lcov.info
 *.dSYM/
 
 # Python developer-tool caches
+/tools/
 __pycache__/
 *.py[cod]
 .pytest_cache/
