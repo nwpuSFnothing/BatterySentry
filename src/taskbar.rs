@@ -135,6 +135,111 @@ unsafe extern "system" fn collect_native(hwnd: HWND, context: LPARAM) -> i32 {
     }
 }
 
+fn native_occupied(bar: HWND, bounds: RECT, explorer: u32) -> io::Result<Vec<Span>> {
+    let mut scan = NativeScan {
+        bar: bounds,
+        explorer,
+        own: std::process::id(),
+        occupied: Vec::new(),
+    };
+    // SAFETY: callbacks are synchronous and receive this live, uniquely borrowed scan.
+    unsafe {
+        EnumChildWindows(
+            bar,
+            Some(collect_native),
+            (&mut scan as *mut NativeScan) as isize,
+        );
+        if EnumWindows(
+            Some(collect_native),
+            (&mut scan as *mut NativeScan) as isize,
+        ) == 0
+        {
+            return Err(crate::win::error("Read taskbar occupants"));
+        }
+    }
+    Ok(scan.occupied)
+}
+
+pub fn current_occupied(bar: HWND) -> io::Result<(RECT, Vec<Span>)> {
+    let mut bounds = RECT::default();
+    let mut explorer = 0;
+    // SAFETY: the live taskbar handle is only queried, with bounded output buffers.
+    unsafe {
+        if GetWindowRect(bar, &mut bounds) == 0 || GetWindowThreadProcessId(bar, &mut explorer) == 0
+        {
+            return Err(crate::win::error("Read current taskbar geometry"));
+        }
+    }
+    Ok((bounds, native_occupied(bar, bounds, explorer)?))
+}
+
+pub fn is_free(rect: &RECT, bar: &RECT, occupied: &[Span]) -> bool {
+    rect.left >= bar.left
+        && rect.right <= bar.right
+        && rect.top >= bar.top
+        && rect.bottom <= bar.bottom
+        && rect.right > rect.left
+        && rect.bottom > rect.top
+        && !occupied
+            .iter()
+            .any(|s| s.left < rect.right && s.right > rect.left)
+}
+
+/// Keep a safe existing slot; validate a new slot against the latest physical bounds.
+pub fn stable_placement(
+    bar: &RECT,
+    desired: RECT,
+    current: Option<RECT>,
+    occupied: &[Span],
+    minimum: i32,
+) -> Option<RECT> {
+    if desired.right - desired.left < minimum
+        || desired.top < 0
+        || desired.bottom > bar.bottom - bar.top
+        || desired.bottom <= desired.top
+    {
+        return None;
+    }
+    let absolute = RECT {
+        left: desired.left + bar.left,
+        right: desired.right + bar.left,
+        top: desired.top + bar.top,
+        bottom: desired.bottom + bar.top,
+    };
+    if let Some(current) = current {
+        let anchored = RECT {
+            left: current.left,
+            right: current.right,
+            ..absolute
+        };
+        if current.right - current.left >= minimum && is_free(&anchored, bar, occupied) {
+            return Some(RECT {
+                left: current.left - bar.left,
+                right: current.right - bar.left,
+                ..desired
+            });
+        }
+    }
+    if is_free(&absolute, bar, occupied) {
+        return Some(desired);
+    }
+    let gap = rightmost_gap(
+        Span {
+            left: bar.left,
+            right: bar.right,
+        },
+        occupied,
+        desired.right - desired.left,
+        minimum,
+        0,
+    )?;
+    Some(RECT {
+        left: gap.left - bar.left,
+        right: gap.right - bar.left,
+        ..desired
+    })
+}
+
 fn snapshot(automation: Option<&IUIAutomation>) -> Layout {
     // SAFETY: read-only enumeration with bounded stack buffers and a synchronous
     // callback. COM interfaces are used on their dedicated initialized thread.
@@ -194,22 +299,7 @@ fn snapshot(automation: Option<&IUIAutomation>) -> Layout {
                 reason: "Taskbar display hidden for fullscreen application".into(),
             };
         }
-        let mut native = NativeScan {
-            bar: bounds,
-            explorer,
-            own: std::process::id(),
-            occupied: Vec::new(),
-        };
-        EnumChildWindows(
-            bar,
-            Some(collect_native),
-            (&mut native as *mut NativeScan) as isize,
-        );
-        // Also catches third-party taskbar-aligned top-level windows.
-        EnumWindows(
-            Some(collect_native),
-            (&mut native as *mut NativeScan) as isize,
-        );
+        let mut occupied = native_occupied(bar, bounds, explorer).unwrap_or_default();
         debug_layout("native enumeration complete");
         let mut uia_ok = false;
         if let Some(automation) = automation
@@ -241,7 +331,7 @@ fn snapshot(automation: Option<&IUIAutomation>) -> Layout {
                         bottom: r.bottom,
                     };
                     if intersects(&bounds, &r) && r.right > r.left {
-                        native.occupied.push(Span {
+                        occupied.push(Span {
                             left: r.left,
                             right: r.right,
                         });
@@ -251,7 +341,7 @@ fn snapshot(automation: Option<&IUIAutomation>) -> Layout {
             }
         }
         debug_layout("UIA enumeration complete");
-        let trusted_occupied = native.occupied.clone();
+        let trusted_occupied = occupied.clone();
         let mut provisional = false;
         if !uia_ok {
             // Conservatively reserve the complete task-list region when UIA is
@@ -264,7 +354,7 @@ fn snapshot(automation: Option<&IUIAutomation>) -> Layout {
                 let mut r = RECT::default();
                 if !list.is_null() && GetWindowRect(list, &mut r) != 0 {
                     provisional = true;
-                    native.occupied.push(Span {
+                    occupied.push(Span {
                         left: r.left,
                         right: r.right,
                     });
@@ -272,14 +362,14 @@ fn snapshot(automation: Option<&IUIAutomation>) -> Layout {
             }
         }
         if std::env::var_os("BATTERYSENTRY_LAYOUT_DEBUG").is_some() {
-            eprintln!("occupied: {:?}", native.occupied);
+            eprintln!("occupied: {occupied:?}");
         }
         let gap = rightmost_gap(
             Span {
                 left: bounds.left,
                 right: bounds.right,
             },
-            &native.occupied,
+            &occupied,
             scale(200),
             scale(150),
             0,
@@ -513,6 +603,87 @@ fn debug_layout(message: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn popup_updates_keep_safe_slot_and_recheck_litemonitor() {
+        let bar = RECT {
+            left: 0,
+            top: 0,
+            right: 1280,
+            bottom: 48,
+        };
+        let desired = RECT {
+            left: 920,
+            top: 3,
+            right: 1120,
+            bottom: 45,
+        };
+        let current = RECT {
+            left: 800,
+            top: 3,
+            right: 1000,
+            bottom: 45,
+        };
+        let transient = [
+            Span {
+                left: 0,
+                right: 200,
+            },
+            Span {
+                left: 1120,
+                right: 1280,
+            },
+        ];
+        let kept = stable_placement(&bar, desired, Some(current), &transient, 150).unwrap();
+        assert_eq!((kept.left, kept.right), (800, 1000));
+
+        let mut occupied = transient.to_vec();
+        occupied.push(Span {
+            left: 1000,
+            right: 1120,
+        });
+        let checked = stable_placement(&bar, desired, None, &occupied, 150).unwrap();
+        assert_eq!((checked.left, checked.right), (800, 1000));
+
+        occupied[2].left = 900;
+        let moved = stable_placement(&bar, desired, Some(current), &occupied, 150).unwrap();
+        assert_eq!((moved.left, moved.right), (700, 900));
+        assert!(
+            stable_placement(
+                &bar,
+                desired,
+                Some(current),
+                &[Span {
+                    left: 0,
+                    right: 1280
+                }],
+                150
+            )
+            .is_none()
+        );
+
+        let shifted = RECT {
+            left: -1280,
+            right: 0,
+            ..bar
+        };
+        let current = RECT {
+            left: -480,
+            right: -280,
+            ..current
+        };
+        let occupied = [
+            Span {
+                left: -280,
+                right: -160,
+            },
+            Span {
+                left: -160,
+                right: 0,
+            },
+        ];
+        let kept = stable_placement(&shifted, desired, Some(current), &occupied, 150).unwrap();
+        assert_eq!((kept.left, kept.right), (800, 1000));
+    }
     #[test]
     fn places_left_of_litemonitor_and_tray() {
         let occupied = [

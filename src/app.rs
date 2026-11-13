@@ -219,31 +219,54 @@ impl App {
         unsafe {
             let parent = layout.parent as HWND;
             let mut bar = RECT::default();
-            if !parent.is_null() {
-                GetWindowRect(parent, &mut bar);
-            }
-            if layout.provisional
-                && IsWindow(self.widget) != 0
-                && IsWindowVisible(self.widget) != 0
-                && self.widget_parent == parent
-            {
-                let mut current = RECT::default();
-                GetWindowRect(self.widget, &mut current);
-                if !layout
-                    .occupied
-                    .iter()
-                    .any(|s| s.left < current.right && s.right > current.left)
-                {
-                    // A conservative native container bound is not a new layout.
-                    // Keep the last verified UIA placement while refinement runs.
-                    KillTimer(self.host, 4);
-                    self.layout_retry_pending = false;
-                    self.layout_failures = 0;
-                    self.layout_status.clear();
-                    return;
+            let mut occupied = layout.occupied;
+            if !parent.is_null() && !self.layout_intentionally_hidden {
+                match taskbar::current_occupied(parent) {
+                    Ok((bounds, live)) => {
+                        bar = bounds;
+                        occupied.extend(live);
+                    }
+                    Err(error) => {
+                        self.layout_status = error.to_string();
+                        self.layout_failed();
+                        return;
+                    }
                 }
             }
-            let Some(r) = layout.rect.filter(|_| !parent.is_null()) else {
+            let mut current = RECT::default();
+            let current_slot = if !dpi_changed
+                && self.widget_parent == parent
+                && IsWindow(self.widget) != 0
+                && IsWindowVisible(self.widget) != 0
+                && GetWindowRect(self.widget, &mut current) != 0
+            {
+                Some(current)
+            } else {
+                None
+            };
+            let mut desired = layout.rect.filter(|_| !parent.is_null());
+            if desired.is_none()
+                && layout.provisional
+                && let Some(current) = current_slot.filter(|r| taskbar::is_free(r, &bar, &occupied))
+            {
+                // Keep an already verified slot while UIA refines conservative native bounds.
+                desired = Some(RECT {
+                    left: current.left - bar.left,
+                    right: current.right - bar.left,
+                    top: current.top - bar.top,
+                    bottom: current.bottom - bar.top,
+                });
+            }
+            let placement = desired.and_then(|r| {
+                taskbar::stable_placement(
+                    &bar,
+                    r,
+                    current_slot,
+                    &occupied,
+                    scale(150, self.widget_dpi),
+                )
+            });
+            let Some(r) = placement else {
                 if !self.widget.is_null() && IsWindowVisible(self.widget) != 0 {
                     ShowWindow(self.widget, SW_HIDE);
                 }
