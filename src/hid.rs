@@ -1,4 +1,9 @@
 //! Separate overlapped reader/writer. Pending buffers live until completed cancellation.
+//!
+//! Feature/Input Report operations and standard HID battery reading were adapted from
+//! MoFeng2223/BrimDeck 89b93972f4c0bf57e9b8a14ceff1515b30f9c1d6 and modified for
+//! BatterySentry. Those portions are subject to Apache-2.0 and applicable upstream
+//! notices; see THIRD_PARTY_NOTICES.md and licenses/. The existing transport is retained.
 use crate::win::{Handle, error, wide};
 use std::{
     io,
@@ -26,6 +31,16 @@ pub struct Interface {
     pub output_len: u16,
     pub feature_len: u16,
     pub product: String,
+    pub battery_features: Vec<BatteryFeature>,
+}
+#[derive(Debug, Clone)]
+pub struct BatteryFeature {
+    pub report: u8,
+    pub page: u16,
+    pub usage: u16,
+    pub link: u16,
+    pub min: i32,
+    pub max: i32,
 }
 struct DeviceSet(HDEVINFO);
 impl Drop for DeviceSet {
@@ -132,6 +147,35 @@ fn inspect(path: &str) -> io::Result<Interface> {
         }
         let mut caps = HIDP_CAPS::default();
         let status = HidP_GetCaps(prep, &mut caps);
+        let mut battery_features = Vec::new();
+        if status == HIDP_STATUS_SUCCESS && caps.NumberFeatureValueCaps > 0 {
+            let mut count = caps.NumberFeatureValueCaps;
+            let mut values = vec![HIDP_VALUE_CAPS::default(); usize::from(count)];
+            if HidP_GetValueCaps(HidP_Feature, values.as_mut_ptr(), &mut count, prep)
+                == HIDP_STATUS_SUCCESS
+            {
+                for c in values.iter().take(usize::from(count)) {
+                    let usage = if c.IsRange {
+                        c.Anonymous.Range.UsageMin
+                    } else {
+                        c.Anonymous.NotRange.Usage
+                    };
+                    if matches!(
+                        (c.UsagePage, usage),
+                        (6, 0x20) | (0x0d, 0x3b) | (0x85, 0x65 | 0x66)
+                    ) {
+                        battery_features.push(BatteryFeature {
+                            report: c.ReportID,
+                            page: c.UsagePage,
+                            usage,
+                            link: c.LinkCollection,
+                            min: c.LogicalMin,
+                            max: c.LogicalMax,
+                        });
+                    }
+                }
+            }
+        }
         HidD_FreePreparsedData(prep);
         if status != HIDP_STATUS_SUCCESS {
             return Err(io::Error::other("Invalid HID capabilities"));
@@ -156,6 +200,7 @@ fn inspect(path: &str) -> io::Result<Interface> {
             output_len: caps.OutputReportByteLength,
             feature_len: caps.FeatureReportByteLength,
             product: String::from_utf16_lossy(&product[..len]),
+            battery_features,
         })
     }
 }
@@ -166,16 +211,160 @@ pub struct Transport {
     input_len: usize,
 }
 impl Transport {
+    pub fn battery_feature(
+        &self,
+        path: &str,
+        feature: &BatteryFeature,
+        length: usize,
+    ) -> io::Result<Option<u8>> {
+        let report = self.get_feature(feature.report, length)?;
+        let handle = open(path, 0, 0)?;
+        // SAFETY: preparsed data belongs to this handle and is freed after the HID parser returns;
+        // the report buffer is immutable and valid for its explicit length.
+        unsafe {
+            let mut prep = 0;
+            if !HidD_GetPreparsedData(handle.raw(), &mut prep) {
+                return Err(error("HID battery descriptor"));
+            }
+            let mut value = 0;
+            let status = HidP_GetUsageValue(
+                HidP_Feature,
+                feature.page,
+                feature.link,
+                feature.usage,
+                &mut value,
+                prep,
+                report.as_ptr(),
+                report.len() as u32,
+            );
+            HidD_FreePreparsedData(prep);
+            if status != HIDP_STATUS_SUCCESS {
+                return Ok(None);
+            }
+            let min = i64::from(feature.min);
+            let max = if feature.max > feature.min {
+                i64::from(feature.max)
+            } else {
+                min + 100
+            };
+            let value = i64::from(value);
+            Ok((min..=max).contains(&value).then(|| {
+                (((value - min) as f64 * 100.0 / (max - min) as f64).round_ties_even()) as u8
+            }))
+        }
+    }
+    /// Opens an additional protocol collection, including input-only and feature-only interfaces.
+    pub fn open_collection(i: &Interface) -> io::Result<Self> {
+        let reader = open(&i.path, GENERIC_READ, FILE_FLAG_OVERLAPPED)
+            .or_else(|_| open(&i.path, 0, FILE_FLAG_OVERLAPPED))?;
+        let writer = open(&i.path, GENERIC_READ | GENERIC_WRITE, FILE_FLAG_OVERLAPPED)
+            .or_else(|_| open(&i.path, 0, FILE_FLAG_OVERLAPPED))?;
+        Self::from_handles(reader, writer, usize::from(i.input_len))
+    }
+
+    /// Uses the interrupt output channel; legacy validated drivers retain their control-pipe writes.
+    pub fn write_interrupt(&self, buffer: &[u8]) -> io::Result<()> {
+        let mut ov = OVERLAPPED {
+            hEvent: self.event.raw(),
+            ..Default::default()
+        };
+        let mut count = 0;
+        // SAFETY: buffer and OVERLAPPED remain alive through completion or completed cancellation.
+        unsafe {
+            ResetEvent(self.event.raw());
+            if WriteFile(
+                self.writer.raw(),
+                buffer.as_ptr(),
+                buffer.len() as u32,
+                &mut count,
+                &mut ov,
+            ) == 0
+            {
+                if GetLastError() != ERROR_IO_PENDING {
+                    return Err(error("Write receiver report"));
+                }
+                count = self
+                    .finish(self.writer.raw(), &mut ov, Duration::from_millis(500))?
+                    .ok_or_else(|| {
+                        io::Error::new(io::ErrorKind::TimedOut, "Receiver write timed out")
+                    })?;
+            }
+        }
+        if count as usize != buffer.len() {
+            return Err(io::Error::other("Incomplete receiver report"));
+        }
+        Ok(())
+    }
+
+    /// Feature/input IOCTLs with bounded waiting and completed cancellation, as in hidapi.
+    fn report_control(&self, code: u32, buffer: &mut [u8]) -> io::Result<()> {
+        let mut ov = OVERLAPPED {
+            hEvent: self.event.raw(),
+            ..Default::default()
+        };
+        let mut count = 0;
+        // SAFETY: the same report is supplied in both buffers per the HID IOCTL contract;
+        // no Rust reference is used while the kernel owns it, including during cancellation.
+        unsafe {
+            ResetEvent(self.event.raw());
+            if DeviceIoControl(
+                self.writer.raw(),
+                code,
+                buffer.as_ptr().cast(),
+                buffer.len() as u32,
+                buffer.as_mut_ptr().cast(),
+                buffer.len() as u32,
+                &mut count,
+                &mut ov,
+            ) == 0
+            {
+                if GetLastError() != ERROR_IO_PENDING {
+                    return Err(error("Receiver feature/input report"));
+                }
+                self.finish(self.writer.raw(), &mut ov, Duration::from_millis(500))?
+                    .ok_or_else(|| {
+                        io::Error::new(io::ErrorKind::TimedOut, "Receiver report timed out")
+                    })?;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn set_feature(&self, data: &[u8], length: usize) -> io::Result<()> {
+        let mut data = data.to_vec();
+        data.resize(length.max(data.len()), 0);
+        self.report_control(0xB0191, &mut data)
+    }
+
+    pub fn get_feature(&self, id: u8, length: usize) -> io::Result<Vec<u8>> {
+        self.get_report(0xB0192, id, length)
+    }
+
+    pub fn get_input(&self, id: u8, length: usize) -> io::Result<Vec<u8>> {
+        self.get_report(0xB01A2, id, length)
+    }
+
+    fn get_report(&self, code: u32, id: u8, length: usize) -> io::Result<Vec<u8>> {
+        let mut data = vec![0; length.max(2)];
+        data[0] = id;
+        self.report_control(code, &mut data)?;
+        Ok(data)
+    }
+
     pub fn open(i: &Interface) -> io::Result<Self> {
         let reader = open(&i.path, GENERIC_READ, FILE_FLAG_OVERLAPPED)?;
         let writer = open(&i.path, GENERIC_READ | GENERIC_WRITE, FILE_FLAG_OVERLAPPED)?;
-        // SAFETY: creates an unnamed manual-reset event without a security descriptor.
+        Self::from_handles(reader, writer, usize::from(i.input_len))
+    }
+
+    fn from_handles(reader: Handle, writer: Handle, input_len: usize) -> io::Result<Self> {
+        // SAFETY: creates an owned manual-reset event for sequential I/O on these handles.
         let event = unsafe { Handle::new(CreateEventW(ptr::null(), 1, 0, ptr::null()))? };
         Ok(Self {
             reader,
             writer,
             event,
-            input_len: usize::from(i.input_len),
+            input_len,
         })
     }
     fn finish(&self, h: HANDLE, ov: &mut OVERLAPPED, timeout: Duration) -> io::Result<Option<u32>> {
@@ -273,29 +462,8 @@ impl Transport {
             if code != ERROR_INVALID_FUNCTION && code != ERROR_NOT_SUPPORTED {
                 return Err(io::Error::from_raw_os_error(code as i32));
             }
-            ResetEvent(self.event.raw());
-            if WriteFile(
-                self.writer.raw(),
-                buffer.as_ptr(),
-                buffer.len() as u32,
-                &mut count,
-                &mut ov,
-            ) == 0
-            {
-                if GetLastError() != ERROR_IO_PENDING {
-                    return Err(error("Write HID query"));
-                }
-                count = self
-                    .finish(self.writer.raw(), &mut ov, Duration::from_millis(500))?
-                    .ok_or_else(|| {
-                        io::Error::new(io::ErrorKind::TimedOut, "HID write timed out")
-                    })?;
-            }
         }
-        if count as usize != buffer.len() {
-            return Err(io::Error::other("Incomplete HID write"));
-        }
-        Ok(())
+        self.write_interrupt(buffer)
     }
     pub fn exchange<T>(
         &self,
@@ -309,6 +477,15 @@ impl Transport {
             }
         }
         self.write(request)?;
+        self.receive(timeout, decode)
+    }
+
+    /// Reads until a matching reply arrives or the shared deadline expires.
+    pub fn receive<T>(
+        &self,
+        timeout: Duration,
+        decode: impl Fn(&[u8]) -> Option<T>,
+    ) -> io::Result<Option<T>> {
         let deadline = Instant::now() + timeout;
         while let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
             if let Some(r) = self.read(remaining)? {

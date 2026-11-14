@@ -5,7 +5,9 @@ pub fn reading_status(reading: &Reading, theme: Theme) -> (&'static str, u32) {
         Some(BatteryValue::Percent(n)) if n <= 10 => ("Critical", theme.danger),
         Some(BatteryValue::Percent(n)) if n <= 30 => ("Low battery", theme.warning),
         Some(BatteryValue::Percent(_)) => ("On battery", theme.success),
-        Some(BatteryValue::Charging) => ("Charging", theme.accent),
+        Some(BatteryValue::Charging | BatteryValue::PercentCharging(_)) => {
+            ("Charging", theme.accent)
+        }
         None if reading.last_known.is_some() => ("Cached", theme.muted),
         None => ("No reading", theme.muted),
     }
@@ -21,7 +23,7 @@ impl View<'_> {
         let charging = self
             .readings
             .iter()
-            .filter(|r| r.value == Some(BatteryValue::Charging))
+            .filter(|r| r.value.is_some_and(BatteryValue::charging))
             .count();
         let mut summary = format!("{} devices", self.readings.len());
         if low > 0 {
@@ -154,7 +156,7 @@ impl View<'_> {
             );
             let label_width = c.text_width(label, FONT_SMALL, WEIGHT_NORMAL as i32) + 12;
             let label_x = right - label_width;
-            let detail_right = if reading.value == Some(BatteryValue::Charging) {
+            let detail_right = if reading.value.is_some_and(BatteryValue::charging) {
                 right
             } else {
                 c.round(
@@ -188,7 +190,11 @@ impl View<'_> {
                 THEME.muted,
             );
             // Charging carries no percentage. Cached percentages retain their muted styling.
-            if let Some(BatteryValue::Percent(percent)) = reading.value.or(reading.last_known) {
+            if let Some(percent) = reading
+                .value
+                .or(reading.last_known)
+                .and_then(BatteryValue::percent)
+            {
                 let width = right - 64;
                 c.round(64, y + 65, width, 4, 4, THEME.surface_alt);
                 let filled = width * i32::from(percent.min(100)) / 100;
@@ -196,7 +202,7 @@ impl View<'_> {
                     c.round(64, y + 65, filled, 4, 4, ink);
                 }
                 c.fill(34, y + 33, 10 * i32::from(percent.min(100)) / 100, 5, ink);
-            } else if reading.value == Some(BatteryValue::Charging) {
+            } else if reading.value.is_some_and(BatteryValue::charging) {
                 c.line(40, y + 24, 37, y + 35, THEME.accent);
                 c.line(37, y + 35, 42, y + 35, THEME.accent);
                 c.line(42, y + 35, 39, y + 46, THEME.accent);

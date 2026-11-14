@@ -22,9 +22,11 @@ impl Reading {
     pub fn value_text(&self) -> String {
         match self.value {
             Some(BatteryValue::Percent(n)) => format!("{n}%"),
+            Some(BatteryValue::PercentCharging(n)) => format!("{n}% ⚡"),
             Some(BatteryValue::Charging) => "Charging".into(),
             None => match self.last_known {
                 Some(BatteryValue::Percent(n)) => format!("~{n}%"),
+                Some(BatteryValue::PercentCharging(n)) => format!("~{n}%"),
                 Some(BatteryValue::Charging) => "~Charging".into(),
                 None => "--".into(),
             },
@@ -84,7 +86,18 @@ impl DeviceDriver for Atk {
                 protocol::atk_reply,
                 Duration::from_millis(400),
             )? {
-                return Ok(Some(v));
+                let charging = t
+                    .exchange(
+                        &protocol::atk_charging_request(),
+                        protocol::atk_charging_reply,
+                        Duration::from_millis(400),
+                    )
+                    .ok()
+                    .flatten();
+                return Ok(Some(match (v, charging) {
+                    (BatteryValue::Percent(n), Some(true)) => BatteryValue::PercentCharging(n),
+                    _ => v,
+                }));
             }
         }
         Ok(None)
@@ -181,8 +194,12 @@ struct CachedIdentity {
 #[derive(Debug, Default)]
 pub struct Scanner {
     identities: HashMap<String, CachedIdentity>,
+    receivers: crate::receivers::Scanner,
 }
 impl Scanner {
+    pub fn set_notify(&mut self, notify: impl Fn() + Send + Sync + 'static) {
+        self.receivers.set_notify(notify);
+    }
     pub fn invalidate_identities(&mut self) {
         self.identities.clear();
     }
@@ -230,6 +247,7 @@ impl Scanner {
             }
             readings.push(reading);
         }
+        readings.extend(self.receivers.scan(&interfaces));
         readings.sort_by(|a, b| a.device_key.cmp(&b.device_key));
         Ok(readings)
     }
@@ -278,6 +296,7 @@ fn scan_interface(
             match v {
                 BatteryValue::Charging => "Cable connected · percentage unavailable".into(),
                 BatteryValue::Percent(_) => "Connected via 2.4 GHz".into(),
+                BatteryValue::PercentCharging(_) => "Connected via 2.4 GHz · charging".into(),
             },
         ),
         Ok(None) => (None, "No reply · wake the device and refresh".into()),
@@ -307,7 +326,7 @@ impl ReadingCache {
         self.0
             .retain(|key, _| readings.iter().any(|r| &r.device_key == key));
         for r in readings {
-            r.last_known = None;
+            let receiver_cached = r.last_known.take();
             if let Some(value) = r.value {
                 self.0.insert(r.device_key.clone(), (value, now));
             } else if let Some(&(value, time)) = self.0.get(&r.device_key) {
@@ -319,6 +338,8 @@ impl ReadingCache {
                         age.as_secs()
                     );
                 }
+            } else {
+                r.last_known = receiver_cached;
             }
         }
     }

@@ -1,3 +1,12 @@
+许可适用范围 / Licensing scope
+
+下面的 MIT 许可适用于 BatterySentry 的原创部分。移植或引入的第三方部分继续适用其各自的许可证及声明；本文件不替代这些许可，也不将第三方作品的版权归于 nwpuSFnothing。
+
+The MIT License below covers original BatterySentry contributions. Third-party
+portions remain subject to their respective licenses and notices, which are not
+replaced by this file. See THIRD_PARTY_NOTICES.md and licenses/ for the applicable
+terms, upstream attributions and copyright notices.
+
 MIT License
 
 Copyright (c) 2026 nwpuSFnothing

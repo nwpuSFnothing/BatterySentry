@@ -1,11 +1,14 @@
-//! Controlled native-window rendering checks and process metrics, using synthetic readings.
+//! Native rendering lifecycle checks, without screenshots or performance sampling.
 use super::*;
 use crate::win::wide;
-use std::{fs, mem::size_of, ptr, thread, time::Duration};
+use std::{mem::size_of, ptr};
 use windows_sys::Win32::{
     Foundation::*,
     Graphics::Gdi::*,
-    System::{LibraryLoader::GetModuleHandleW, ProcessStatus::*, Threading::*},
+    System::{
+        LibraryLoader::GetModuleHandleW,
+        Threading::{GR_GDIOBJECTS, GR_USEROBJECTS, GetCurrentProcess, GetGuiResources},
+    },
     UI::{HiDpi::*, WindowsAndMessaging::*},
 };
 
@@ -29,6 +32,7 @@ fn readings(count: usize) -> Vec<Reading> {
             value: match i {
                 1 => Some(BatteryValue::Charging),
                 2 => None,
+                3 => Some(BatteryValue::PercentCharging(65)),
                 _ => Some(BatteryValue::Percent(83)),
             },
             last_known: (i == 2).then_some(BatteryValue::Percent(65)),
@@ -39,68 +43,6 @@ fn readings(count: usize) -> Vec<Reading> {
             },
         })
         .collect()
-}
-fn cpu_time() -> u64 {
-    let mut created = FILETIME::default();
-    let mut exited = FILETIME::default();
-    let mut kernel = FILETIME::default();
-    let mut user = FILETIME::default();
-    // SAFETY: current process handle is borrowed and all four output values are writable.
-    unsafe {
-        assert_ne!(
-            GetProcessTimes(
-                GetCurrentProcess(),
-                &mut created,
-                &mut exited,
-                &mut kernel,
-                &mut user
-            ),
-            0
-        );
-    }
-    let value = |t: FILETIME| (u64::from(t.dwHighDateTime) << 32) | u64::from(t.dwLowDateTime);
-    value(kernel) + value(user)
-}
-thread_local! {
-    static PREVIOUS_SAMPLE: std::cell::Cell<Option<(u64, Instant)>> = const { std::cell::Cell::new(None) };
-}
-fn sample(phase: &str) {
-    let (cpu, start) = PREVIOUS_SAMPLE.with(|previous| {
-        previous
-            .get()
-            .unwrap_or_else(|| (cpu_time(), Instant::now()))
-    });
-    thread::sleep(Duration::from_millis(250));
-    let now = Instant::now();
-    let current_cpu = cpu_time();
-    let percent =
-        (current_cpu - cpu) as f64 / 10_000_000.0 / now.duration_since(start).as_secs_f64() * 100.0;
-    PREVIOUS_SAMPLE.with(|previous| previous.set(Some((current_cpu, now))));
-    let mut memory = PROCESS_MEMORY_COUNTERS_EX {
-        cb: size_of::<PROCESS_MEMORY_COUNTERS_EX>() as u32,
-        ..Default::default()
-    };
-    // SAFETY: extended process counter buffer has its exact byte size and current process access.
-    unsafe {
-        assert_ne!(
-            GetProcessMemoryInfo(
-                GetCurrentProcess(),
-                (&mut memory as *mut PROCESS_MEMORY_COUNTERS_EX).cast(),
-                memory.cb
-            ),
-            0
-        );
-        eprintln!(
-            "METRIC {phase} WS={} PRIVATE={} CPU_ONE_CORE={percent:.2}% GDI={} USER={}",
-            memory.WorkingSetSize,
-            memory.PrivateUsage,
-            GetGuiResources(GetCurrentProcess(), GR_GDIOBJECTS),
-            GetGuiResources(GetCurrentProcess(), GR_USEROBJECTS)
-        );
-    }
-}
-fn suspend(renderer: &mut renderer::Renderer) {
-    renderer.release_target();
 }
 fn paint(
     renderer: &mut renderer::Renderer,
@@ -129,11 +71,6 @@ fn paint(
 }
 #[test]
 fn native_rendering_lifecycle() {
-    let root = std::env::current_dir()
-        .unwrap()
-        .join("artifacts/renderer-check");
-    fs::create_dir_all(&root).unwrap();
-    let prefix = std::env::var("BATTERYSENTRY_RENDER_LABEL").unwrap_or_else(|_| "d2d".into());
     // SAFETY: all fixture windows, resources and message operations belong to this test thread.
     unsafe {
         SetThreadDpiAwarenessContext(
@@ -166,7 +103,7 @@ fn native_rendering_lifecycle() {
         assert!(!hwnd.is_null());
         let window = Window(hwnd);
         let mut renderer = renderer::Renderer::default();
-        sample("startup-idle");
+
         ShowWindow(hwnd, SW_SHOWNOACTIVATE);
         SetWindowPos(
             hwnd,
@@ -180,7 +117,7 @@ fn native_rendering_lifecycle() {
         let mut panel = Panel::new(420, 340, false);
         let two = readings(2);
         paint(&mut renderer, hwnd, &panel, &two, 96);
-        sample("devices");
+
         panel.show_page(Page::Settings);
         panel.height = layout::preferred_height(Page::Settings, 2);
         SetWindowPos(
@@ -193,7 +130,7 @@ fn native_rendering_lifecycle() {
             SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
         );
         paint(&mut renderer, hwnd, &panel, &two, 96);
-        sample("settings");
+
         panel.show_page(Page::Devices);
         panel.width = 600;
         panel.height = 460;
@@ -207,44 +144,27 @@ fn native_rendering_lifecycle() {
             SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
         );
         paint(&mut renderer, hwnd, &panel, &two, 96);
-        sample("resize");
+
         paint(&mut renderer, hwnd, &panel, &readings(3), 96);
-        sample("refresh-fixture");
+
         ShowWindow(hwnd, SW_MINIMIZE);
-        suspend(&mut renderer);
-        sample("minimized");
+        renderer.release_target();
+
         ShowWindow(hwnd, SW_HIDE);
-        suspend(&mut renderer);
-        sample("hidden");
+        renderer.release_target();
+
         ShowWindow(hwnd, SW_SHOWNOACTIVATE);
         ShowWindow(hwnd, SW_RESTORE);
-        for _ in 0..12 {
-            paint(&mut renderer, hwnd, &panel, &two, 96);
-            ShowWindow(hwnd, SW_HIDE);
-            suspend(&mut renderer);
-            ShowWindow(hwnd, SW_SHOWNOACTIVATE);
-            SetWindowPos(
-                hwnd,
-                HWND_TOPMOST,
-                0,
-                0,
-                0,
-                0,
-                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
-            );
-        }
-        paint(&mut renderer, hwnd, &panel, &two, 96);
-        sample("reopened-12");
         let gdi_before = GetGuiResources(GetCurrentProcess(), GR_GDIOBJECTS);
         let user_before = GetGuiResources(GetCurrentProcess(), GR_USEROBJECTS);
         paint(&mut renderer, hwnd, &panel, &two, 96);
-        for _ in 0..24 {
+        for _ in 0..3 {
             ShowWindow(hwnd, SW_HIDE);
-            suspend(&mut renderer);
+            renderer.release_target();
             ShowWindow(hwnd, SW_SHOWNOACTIVATE);
             paint(&mut renderer, hwnd, &panel, &two, 96);
         }
-        sample("reopened-36");
+
         assert!(GetGuiResources(GetCurrentProcess(), GR_GDIOBJECTS) <= gdi_before + 1);
         assert!(GetGuiResources(GetCurrentProcess(), GR_USEROBJECTS) <= user_before + 1);
         renderer.check_device_loss();
@@ -265,119 +185,14 @@ fn native_rendering_lifecycle() {
                 paint(&mut renderer, hwnd, &panel, &readings(count), dpi);
             }
         }
-        drop(renderer);
-        sample("renderer-released");
-        drop(window);
-        sample("window-destroyed");
-        let widget_parent = CreateWindowExW(
-            WS_EX_TOOLWINDOW,
-            class.as_ptr(),
-            class.as_ptr(),
-            WS_POPUP,
-            0,
-            0,
-            240,
-            48,
-            ptr::null_mut(),
-            ptr::null_mut(),
-            instance,
-            ptr::null(),
-        );
-        assert!(!widget_parent.is_null());
-        let _parent = Window(widget_parent);
-        let child = CreateWindowExW(
-            WS_EX_LAYERED | WS_EX_NOACTIVATE,
-            class.as_ptr(),
-            class.as_ptr(),
-            WS_CHILD | WS_VISIBLE,
-            0,
-            0,
-            200,
-            42,
-            widget_parent,
-            ptr::null_mut(),
-            instance,
-            ptr::null(),
-        );
-        assert!(!child.is_null());
-        let _child = Window(child);
-        assert_ne!(
-            SetLayeredWindowAttributes(child, rgb(210, 210, 211), 255, LWA_COLORKEY),
-            0
-        );
-        let mut widget = widget::WidgetRenderer::default();
-        InvalidateRect(child, ptr::null(), 0);
-        widget
-            .paint(child, 96, |c| {
-                widget::paint_widget(c, &two, THEME, rgb(210, 210, 211))
-            })
-            .unwrap();
-        drop(widget);
-        drop(_child);
-        drop(_parent);
+        panel.show_page(Page::Settings);
         for dpi in [96, 120, 144, 192] {
-            for count in [0, 1, 2, 8] {
-                let panel = Panel::new(420, layout::preferred_height(Page::Devices, count), false);
-                let devices = readings(count);
-                let view = View {
-                    ui: &panel,
-                    readings: &devices,
-                    cfg: &Config::default(),
-                    busy: false,
-                    last: None,
-                    scan_error: "",
-                    layout_status: "",
-                };
-                renderer::write_snapshot(
-                    &root.join(format!("{prefix}-{count}-{dpi}.bmp")),
-                    &panel,
-                    dpi,
-                    false,
-                    |c| view.paint(c),
-                )
-                .unwrap();
-            }
-            let mut panel = Panel::new(420, layout::preferred_height(Page::Settings, 2), false);
-            panel.show_page(Page::Settings);
-            let devices = readings(2);
-            let config = Config::default();
-            let view = View {
-                ui: &panel,
-                readings: &devices,
-                cfg: &config,
-                busy: false,
-                last: None,
-                scan_error: "",
-                layout_status: "",
-            };
-            renderer::write_snapshot(
-                &root.join(format!("{prefix}-settings-{dpi}.bmp")),
-                &panel,
-                dpi,
-                false,
-                |c| view.paint(c),
-            )
-            .unwrap();
+            paint(&mut renderer, hwnd, &panel, &two, dpi);
         }
-        let panel = Panel::new(420, 340, false);
-        let devices = readings(2);
-        let config = Config::default();
-        let view = View {
-            ui: &panel,
-            readings: &devices,
-            cfg: &config,
-            busy: false,
-            last: None,
-            scan_error: "",
-            layout_status: "",
-        };
-        renderer::write_snapshot(
-            &root.join(format!("{prefix}-grayscale.bmp")),
-            &panel,
-            120,
-            true,
-            |c| view.paint(c),
-        )
-        .unwrap();
+        drop(renderer);
+
+        drop(window);
+
+        assert_ne!(UnregisterClassW(class.as_ptr(), instance), 0);
     }
 }

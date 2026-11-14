@@ -71,11 +71,15 @@ impl Worker {
         let (commands, rx) = mpsc::channel();
         let (tx, results) = mpsc::channel();
         let address = hwnd as usize;
+        let wake = commands.clone();
         let join = thread::Builder::new()
             .name("battery-reader".into())
             .spawn(move || {
                 let mut cache = drivers::ReadingCache::default();
                 let mut scanner = drivers::Scanner::default();
+                scanner.set_notify(move || {
+                    let _ = wake.send(Work::Refresh);
+                });
                 while let Ok(work) = rx.recv() {
                     match work {
                         Work::Stop => break,

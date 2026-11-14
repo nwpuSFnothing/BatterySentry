@@ -5,6 +5,7 @@ mod drivers;
 mod hid;
 mod panel;
 mod protocol;
+mod receivers;
 mod startup;
 mod taskbar;
 mod theme;
@@ -14,10 +15,21 @@ mod win;
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.iter().any(|a| a == "--licenses") {
+        app::console();
+        println!(
+            "{}\n\n{}\n\n{}\n\n{}",
+            include_str!("../LICENSE"),
+            include_str!("../THIRD_PARTY_NOTICES.md"),
+            include_str!("../licenses/BrimDeck-Apache-2.0.txt"),
+            include_str!("../licenses/Receiver-protocol-notices.txt")
+        );
+        return;
+    }
     if args.iter().any(|a| a == "--help") {
         app::console();
         println!(
-            "BatterySentry\n  --background   Start on taskbar\n  --once         Read batteries and exit\n  --list         List HID interfaces\n  --quit         Stop running instance\n  --help         Show help"
+            "BatterySentry\n  --background   Start on taskbar\n  --once         Read batteries and exit\n  --list         List HID interfaces\n  --quit         Stop running instance\n  --licenses     Show receiver protocol licenses\n  --help         Show help"
         );
         return;
     }

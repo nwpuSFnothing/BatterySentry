@@ -1,7 +1,19 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BatteryValue {
     Percent(u8),
+    PercentCharging(u8),
     Charging,
+}
+impl BatteryValue {
+    pub fn percent(self) -> Option<u8> {
+        match self {
+            Self::Percent(n) | Self::PercentCharging(n) => Some(n),
+            Self::Charging => None,
+        }
+    }
+    pub fn charging(self) -> bool {
+        matches!(self, Self::Charging | Self::PercentCharging(_))
+    }
 }
 
 /// Device identity returned by the BitMouse protocol, independent of USB PID.
@@ -68,11 +80,21 @@ pub fn atk_request() -> Vec<u8> {
     f
 }
 pub fn atk_reply(r: &[u8]) -> Option<BatteryValue> {
-    if r.len() >= 8 && r[0] == 8 && r[1] == 0x72 && r[5] == 7 && r[7] <= 100 {
+    if r.len() >= 8 && r[0] == 8 && r[1] == 0x72 && r[2] == 0 && r[5] == 7 && r[7] <= 100 {
         Some(BatteryValue::Percent(r[7]))
     } else {
         None
     }
+}
+pub fn atk_charging_request() -> Vec<u8> {
+    let mut f = atk_request();
+    f[6] = 0x0f;
+    f[1] = f[2..].iter().fold(0u8, |sum, b| sum.wrapping_add(*b));
+    f
+}
+pub fn atk_charging_reply(r: &[u8]) -> Option<bool> {
+    (r.len() >= 8 && r[0] == 8 && r[1] == 0x72 && r[2] == 0 && r[5] == 0x0f && r[7] <= 1)
+        .then(|| r[7] == 1)
 }
 pub fn aula_request() -> Vec<u8> {
     let mut f = vec![0; 20];
